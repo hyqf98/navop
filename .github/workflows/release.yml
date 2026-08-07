@@ -218,6 +218,13 @@ jobs:
         run: |
           cmake --version
 
+      - name: Build Windows RDP toolchain probe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./script/build-windows-rdp-probe.ps1
+          -Target "${{ matrix.target }}"
+
       - name: Set environment variables
         shell: bash
         run: |
