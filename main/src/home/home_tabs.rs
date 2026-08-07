@@ -234,6 +234,7 @@ mod tests {
                     username: Some("alice".to_string()),
                     password: Some("secret".to_string()),
                 }),
+                backend_preference: Default::default(),
             },
             None,
         );
@@ -261,6 +262,7 @@ mod tests {
                 read_only: false,
                 audio_playback: true,
                 proxy: None,
+                backend_preference: Default::default(),
             },
             None,
         );

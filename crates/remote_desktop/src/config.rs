@@ -204,6 +204,7 @@ mod tests {
                     username: Some(" proxy-user ".to_string()),
                     password: Some("proxy-secret".to_string()),
                 }),
+                backend_preference: Default::default(),
             });
 
         assert_eq!(RemoteDesktopProtocol::Rdp, options.protocol);
@@ -235,6 +236,7 @@ mod tests {
                 read_only: false,
                 audio_playback: true,
                 proxy: None,
+                backend_preference: Default::default(),
             });
 
         assert_eq!(RemoteDesktopProtocol::Vnc, options.protocol);

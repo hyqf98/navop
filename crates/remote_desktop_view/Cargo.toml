@@ -21,5 +21,9 @@ rust-i18n = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 
+[features]
+default = []
+windows-native-rdp = []
+
 [lints]
 workspace = true

@@ -14,7 +14,8 @@ use gpui_component::input::InputState;
 use gpui_component::select::SelectState;
 use one_core::cloud_sync::TeamOption;
 use one_core::storage::{
-    ProxyType, RemoteDesktopParams, RemoteDesktopProtocol, StoredConnection, Workspace,
+    ProxyType, RemoteDesktopBackendPreference, RemoteDesktopParams, RemoteDesktopProtocol,
+    StoredConnection, Workspace,
 };
 use rust_i18n::t;
 
@@ -52,6 +53,7 @@ pub struct RemoteDesktopFormWindow {
     team_select: Entity<SelectState<Vec<TeamSelectItem>>>,
     read_only: bool,
     audio_playback: bool,
+    backend_preference: RemoteDesktopBackendPreference,
     proxy_enabled: bool,
     proxy_type: ProxyType,
     sync_enabled: bool,
@@ -107,6 +109,7 @@ impl RemoteDesktopFormWindow {
             team_select: create_team_select(&config.teams, None, window, cx),
             read_only: false,
             audio_playback: false,
+            backend_preference: RemoteDesktopBackendPreference::Auto,
             proxy_enabled: false,
             proxy_type: ProxyType::Socks5,
             sync_enabled: config
@@ -164,6 +167,7 @@ impl RemoteDesktopFormWindow {
             .update(cx, |state, cx| state.set_value(&domain, window, cx));
         self.read_only = params.read_only;
         self.audio_playback = audio_playback_for_protocol(self.protocol, params.audio_playback);
+        self.backend_preference = params.backend_preference;
         self.apply_proxy(params.proxy, window, cx);
     }
 
@@ -192,6 +196,7 @@ impl RemoteDesktopFormWindow {
             read_only: self.read_only,
             audio_playback: audio_playback_for_protocol(self.protocol, self.audio_playback),
             proxy,
+            backend_preference: self.backend_preference,
         })
     }
 
