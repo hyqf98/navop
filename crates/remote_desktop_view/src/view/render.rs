@@ -193,8 +193,11 @@ impl TabContent for RemoteDesktopView {
             }
         }
 
-        let _ = (window, cx);
-        Task::ready(true)
+        #[cfg(not(all(feature = "windows-native-rdp", target_os = "windows")))]
+        {
+            let _ = (window, cx);
+            Task::ready(true)
+        }
     }
 }
 
