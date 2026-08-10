@@ -36,6 +36,8 @@ mod output;
 // Task 0 freezes this contract before later tasks wire it into the view runtime.
 #[allow(dead_code)]
 mod presentation;
+#[allow(dead_code)]
+mod presentation_capability;
 mod render;
 mod resize;
 // Task 6 freezes the GPUI/native-child presentation adapter before Task 8
