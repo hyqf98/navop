@@ -175,8 +175,27 @@ impl RemoteDesktopView {
             presentation::RemoteDesktopPresentationInitialization::Pending
         };
         let focus_handle = cx.focus_handle();
+        #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+        let native_event_window_handle = window_handle.clone();
         let output_poll_task = cx.spawn(async move |this, cx| {
             loop {
+                #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+                {
+                    let focus_handle = match this.update(cx, |this, cx| {
+                        let focus_handle = this.poll_windows_native_events();
+                        cx.notify();
+                        focus_handle
+                    }) {
+                        Ok(focus_handle) => focus_handle,
+                        Err(_) => break,
+                    };
+                    if let Some(focus_handle) = focus_handle {
+                        let _ = native_event_window_handle.update(cx, |_, window, cx| {
+                            window.focus(&focus_handle, cx);
+                        });
+                    }
+                }
+                #[cfg(not(all(feature = "windows-native-rdp", target_os = "windows")))]
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -600,6 +619,19 @@ impl RemoteDesktopView {
 
         let _ = &mut focus_parent;
         false
+    }
+
+    #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+    fn poll_windows_native_events(&mut self) -> Option<FocusHandle> {
+        let native = self.windows_native.as_ref()?;
+        let event_state = self.native_event_state.as_mut()?;
+        native.drain_events(event_state);
+        let focus_release_pending = event_state.take_focus_release_pending();
+        if focus_release_pending && self.tab_active {
+            Some(self.focus_handle.clone())
+        } else {
+            None
+        }
     }
 
     #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
