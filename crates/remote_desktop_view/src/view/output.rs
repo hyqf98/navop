@@ -4,6 +4,9 @@ use remote_desktop::RemoteDesktopCursor;
 
 impl RemoteDesktopView {
     pub(super) fn start_runtime(&mut self, size: (u16, u16)) {
+        if !self.presentation_initialization.allows_canvas_runtime() {
+            return;
+        }
         if self.input_tx.is_some() {
             return;
         }
