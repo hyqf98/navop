@@ -142,10 +142,10 @@ pub(crate) enum RemoteDesktopPresentationState {
 pub(crate) const fn classify_windows_native_create_error(
     error: windows_rdp_host::WindowsRdpHostError,
 ) -> Option<WindowsNativeRdpUnavailableReason> {
-    use windows_rdp_host::{WindowsRdpHostError, WindowsRdpHresultKind};
+    use windows_rdp_host::WindowsRdpHresultKind;
 
-    match error {
-        WindowsRdpHostError::NativeHresult { hresult, .. } => match hresult.kind() {
+    match error.hresult() {
+        Some(hresult) => match hresult.kind() {
             WindowsRdpHresultKind::ClassNotRegistered => {
                 Some(WindowsNativeRdpUnavailableReason::ClassNotRegistered)
             }
@@ -154,7 +154,7 @@ pub(crate) const fn classify_windows_native_create_error(
             }
             _ => None,
         },
-        _ => None,
+        None => None,
     }
 }
 
