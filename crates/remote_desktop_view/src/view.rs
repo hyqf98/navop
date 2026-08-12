@@ -259,6 +259,7 @@ pub struct RemoteDesktopView {
     next_clipboard_transfer_id: u64,
     display_scale_factor: u32,
     status: SharedString,
+    failure_detail: Option<SharedString>,
     connected: bool,
     tab_index: Option<usize>,
     presentation_initialization: presentation::RemoteDesktopPresentationInitialization,
@@ -415,6 +416,7 @@ impl RemoteDesktopView {
             next_clipboard_transfer_id: clipboard::FIRST_LOCAL_CLIPBOARD_TRANSFER_ID,
             display_scale_factor: 100,
             status: SharedString::from(t!("RemoteDesktop.status_waiting_layout").to_string()),
+            failure_detail: None,
             connected: false,
             tab_index: config.tab_index,
             presentation_initialization,
@@ -485,6 +487,9 @@ impl RemoteDesktopView {
                     self.fail_presentation_initialization(
                         presentation::RemoteDesktopPresentation::NativeWindows,
                         true,
+                        Some(format!(
+                            "Windows native RDP diagnostic\nstage=selection\nerror={error:?}"
+                        )),
                     );
                 }
             }
@@ -547,6 +552,9 @@ impl RemoteDesktopView {
                 self.fail_presentation_initialization(
                     presentation::RemoteDesktopPresentation::NativeWindows,
                     true,
+                    Some(format!(
+                        "Windows native RDP diagnostic\nstage=selection\nerror={error:?}"
+                    )),
                 );
                 return;
             }
@@ -557,6 +565,10 @@ impl RemoteDesktopView {
                 self.fail_presentation_initialization(
                     presentation::RemoteDesktopPresentation::NativeWindows,
                     true,
+                    Some(
+                        "Windows native RDP diagnostic\nstage=proxy\nerror=SOCKS/HTTP proxy is unsupported by Windows native RDP"
+                            .to_owned(),
+                    ),
                 );
                 self.status =
                     SharedString::from(t!("RemoteDesktop.native_proxy_unsupported").to_string());
@@ -573,6 +585,9 @@ impl RemoteDesktopView {
                 self.fail_presentation_initialization(
                     presentation::RemoteDesktopPresentation::NativeWindows,
                     true,
+                    Some(format!(
+                        "Windows native RDP diagnostic\nstage=create\nerror={error}"
+                    )),
                 );
                 return;
             }
@@ -662,6 +677,7 @@ impl RemoteDesktopView {
         &mut self,
         attempted_presentation: presentation::RemoteDesktopPresentation,
         canvas_retry_available: bool,
+        failure_detail: Option<String>,
     ) {
         self.presentation_initialization =
             presentation::RemoteDesktopPresentationInitialization::Failed {
@@ -669,6 +685,7 @@ impl RemoteDesktopView {
                 canvas_retry_available,
             };
         self.status = SharedString::from(t!("RemoteDesktop.failure_generic").to_string());
+        self.failure_detail = failure_detail.map(SharedString::from);
     }
 
     fn use_canvas(&mut self, _: &UseCanvas, _window: &mut Window, cx: &mut Context<Self>) {
@@ -694,6 +711,7 @@ impl RemoteDesktopView {
                 fallback_reason: None,
             };
         self.status = SharedString::from(t!("RemoteDesktop.status_waiting_layout").to_string());
+        self.failure_detail = None;
         cx.notify();
     }
 
@@ -706,6 +724,8 @@ impl RemoteDesktopView {
         error: impl std::fmt::Debug,
         cx: &mut Context<Self>,
     ) {
+        let failure_detail =
+            format!("Windows native RDP diagnostic\nstage={stage}\nerror={error:?}");
         tracing::warn!(?error, stage, "failed to initialize Windows native RDP");
         let mut focus_parent = || {};
         let destroyed = match native.force_close(&mut focus_parent) {
@@ -735,6 +755,7 @@ impl RemoteDesktopView {
         self.fail_presentation_initialization(
             presentation::RemoteDesktopPresentation::NativeWindows,
             canvas_retry_available,
+            Some(failure_detail),
         );
     }
 
@@ -746,6 +767,8 @@ impl RemoteDesktopView {
         error: impl std::fmt::Debug,
         cx: &mut Context<Self>,
     ) {
+        let failure_detail =
+            format!("Windows native RDP diagnostic\nstage={stage}\nerror={error:?}");
         tracing::warn!(
             ?error,
             stage,
@@ -769,6 +792,7 @@ impl RemoteDesktopView {
         self.fail_presentation_initialization(
             presentation::RemoteDesktopPresentation::NativeWindows,
             destroyed,
+            Some(failure_detail),
         );
     }
 
@@ -858,15 +882,137 @@ impl RemoteDesktopView {
 
     #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
     fn poll_windows_native_events(&mut self) -> Option<FocusHandle> {
-        let native = self.windows_native.as_ref()?;
-        let event_state = self.native_event_state.as_mut()?;
-        native.drain_events(event_state);
-        let focus_release_pending = event_state.take_focus_release_pending();
+        let effects = {
+            let native = self.windows_native.as_ref()?;
+            let event_state = self.native_event_state.as_mut()?;
+            native.drain_events(event_state)
+        };
+        for effect in effects {
+            self.apply_windows_native_ui_effect(effect);
+        }
+        let focus_release_pending = self
+            .native_event_state
+            .as_mut()
+            .map(native_events::NativeRdpEventState::take_focus_release_pending)
+            .unwrap_or(false);
         if focus_release_pending && self.tab_active {
             Some(self.focus_handle.clone())
         } else {
             None
         }
+    }
+
+    #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+    fn apply_windows_native_ui_effect(&mut self, effect: native_events::NativeRdpUiEffect) {
+        use native_events::NativeRdpUiEffect;
+
+        let diagnostic = native_events::diagnostic_text(&effect).map(SharedString::from);
+        match effect {
+            NativeRdpUiEffect::CloseConfirmed | NativeRdpUiEffect::FocusReleased => {}
+            NativeRdpUiEffect::Connecting { generation } => {
+                tracing::info!(generation, "Windows native RDP is connecting");
+                self.connected = false;
+                self.failure_detail = None;
+                self.status = SharedString::from(t!("RemoteDesktop.status_connecting").to_string());
+            }
+            NativeRdpUiEffect::Connected { generation } => {
+                tracing::info!(generation, "Windows native RDP connected");
+                self.mark_windows_native_connected();
+            }
+            NativeRdpUiEffect::LoginComplete { generation } => {
+                tracing::info!(generation, "Windows native RDP login completed");
+                self.mark_windows_native_connected();
+            }
+            NativeRdpUiEffect::Reconnecting {
+                generation,
+                attempt,
+                max_attempts,
+            } => {
+                tracing::warn!(
+                    generation,
+                    attempt,
+                    ?max_attempts,
+                    "Windows native RDP is reconnecting"
+                );
+                self.connected = false;
+                self.failure_detail = None;
+                self.status = SharedString::from(t!("RemoteDesktop.status_connecting").to_string());
+            }
+            NativeRdpUiEffect::Reconnected { generation } => {
+                tracing::info!(generation, "Windows native RDP reconnected");
+                self.mark_windows_native_connected();
+            }
+            NativeRdpUiEffect::Warning {
+                generation,
+                warning,
+            } => {
+                tracing::warn!(
+                    generation,
+                    kind = ?warning.kind(),
+                    code = warning.code(),
+                    "Windows native RDP warning"
+                );
+            }
+            NativeRdpUiEffect::FatalError { generation, error } => {
+                tracing::error!(
+                    generation,
+                    kind = ?error.kind(),
+                    code = error.code(),
+                    "Windows native RDP fatal error"
+                );
+                self.show_windows_native_failure(diagnostic);
+            }
+            NativeRdpUiEffect::LogonError { generation, error } => {
+                tracing::error!(
+                    generation,
+                    kind = ?error.kind(),
+                    code = error.code(),
+                    "Windows native RDP logon error"
+                );
+                self.show_windows_native_failure(diagnostic);
+            }
+            NativeRdpUiEffect::Disconnected { generation, reason } => {
+                tracing::warn!(
+                    generation,
+                    category = ?reason.category(),
+                    disconnect_code = reason.disconnect_code(),
+                    extended_code = ?reason.extended_code(),
+                    "Windows native RDP disconnected"
+                );
+                if reason.category()
+                    != windows_rdp_host::WindowsRdpDiagnosticCategory::UserInitiated
+                {
+                    self.show_windows_native_failure(diagnostic);
+                }
+            }
+            NativeRdpUiEffect::Unknown { event } => {
+                tracing::warn!(
+                    generation = event.generation,
+                    kind = event.kind,
+                    code = event.code,
+                    payload_len = event.payload.len(),
+                    "unknown or malformed Windows native RDP event"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+    fn mark_windows_native_connected(&mut self) {
+        self.connected = true;
+        self.failure_detail = None;
+        self.status = SharedString::from(t!("RemoteDesktop.status_connected").to_string());
+        if self.tab_active {
+            self.activate_windows_native(false);
+        }
+    }
+
+    #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+    fn show_windows_native_failure(&mut self, diagnostic: Option<SharedString>) {
+        self.connected = false;
+        self.status = SharedString::from(t!("RemoteDesktop.failure_generic").to_string());
+        self.failure_detail = diagnostic;
+        self.deactivate_windows_native(|| {});
     }
 
     #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]

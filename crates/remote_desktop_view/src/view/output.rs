@@ -26,6 +26,7 @@ impl RemoteDesktopView {
         self.output_rx = Some(runtime.output_rx);
         self.last_resize_size = Some(size);
         self.connected = false;
+        self.failure_detail = None;
         self.status = SharedString::from(t!("RemoteDesktop.status_connecting").to_string());
     }
 
@@ -59,6 +60,7 @@ impl RemoteDesktopView {
                 self.remote_size = Some((width, height));
                 self.capabilities = Some(capabilities);
                 self.connected = true;
+                self.failure_detail = None;
                 self.frame_sync.connected();
                 self.status = SharedString::from(t!("RemoteDesktop.status_connected").to_string());
             }
