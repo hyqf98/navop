@@ -10,6 +10,7 @@ use crate::local_terminal_profiles::{
     setting_options as local_terminal_profile_options,
 };
 use crate::onetcli_app::{GlobalHomePage, GlobalOnetCliApp};
+use crate::settings::agent_settings::agent_setting_group;
 use crate::settings::appearance::render as render_appearance_settings;
 use crate::settings::llm_providers_view::LlmProvidersView;
 use crate::settings::mcp_settings::mcp_setting_group;
@@ -594,8 +595,10 @@ impl SettingsPanel {
                                             .try_global::<GlobalOnetCliApp>()
                                             .map(|global| global.app.clone());
                                         if let Some(app) = app {
-                                            app.update(cx, |app, cx| {
-                                                app.set_home_page_style(style, cx)
+                                            cx.defer(move |cx| {
+                                                app.update(cx, |app, cx| {
+                                                    app.set_home_page_style(style, cx);
+                                                });
                                             });
                                         } else {
                                             AppSettings::update_and_save(cx, |settings| {
@@ -656,6 +659,30 @@ impl SettingsPanel {
                                     .to_string(),
                             ),
                         ]),
+                    SettingGroup::new()
+                        .title(t!("Settings.General.FileTransfer.group_title"))
+                        .item(
+                            SettingItem::new(
+                                t!("Settings.General.FileTransfer.direct_server_transfer"),
+                                SettingField::switch(
+                                    |cx: &App| {
+                                        AppSettings::global(cx).direct_server_transfer_enabled
+                                    },
+                                    |value: bool, cx: &mut App| {
+                                        AppSettings::update_and_save(cx, |settings| {
+                                            settings.direct_server_transfer_enabled = value;
+                                        });
+                                    },
+                                )
+                                .default_value(default_settings.direct_server_transfer_enabled),
+                            )
+                            .description(
+                                t!(
+                                    "Settings.General.FileTransfer.direct_server_transfer_desc"
+                                )
+                                .to_string(),
+                            ),
+                        ),
                     notes_setting_group(),
                     SettingGroup::new()
                         .title(t!("Settings.General.Appearance.group_title"))
@@ -1045,6 +1072,7 @@ impl SettingsPanel {
                             ),
                         ]),
                     mcp_tool_exposure_setting_group(&default_settings.tool_exposure),
+                    agent_setting_group(&default_settings.ai_chat),
                     agent_tool_exposure_setting_group(&default_settings.tool_exposure),
                     mcp_setting_group(&default_settings.mcp),
                     SettingGroup::new()
@@ -2961,7 +2989,7 @@ const WINDOW_SHORTCUTS: &[ShortcutEntry] = &[
         keys_macos: &["ctrl-w"],
         keys_other: &["ctrl-w"],
         label_key: "Settings.Shortcuts.close_panel",
-        action_id: Some(action_id::WINDOW_CLOSE_PANEL),
+        action_id: Some(action_id::WINDOW_CLOSE_ACTIVE_WINDOW),
         system_hotkey: false,
     },
     ShortcutEntry {

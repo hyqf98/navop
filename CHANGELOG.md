@@ -4,6 +4,102 @@ Navop user-facing release notes. Generate and review each bilingual version entr
 
 <!-- NAVOP_RELEASES -->
 
+## [v0.10.7] - 2026-08-13
+
+### 中文
+
+#### 更新内容
+
+- 终端工作区新增面板分屏控制，可向左、右、上、下拆分终端，并可将面板恢复为普通标签页。
+- 连接侧边栏新增批量选择与管理模式，可选择当前可见连接、批量移动到分组或批量删除，并将相关入口整合到溢出菜单。
+- SSH 连接支持配置终端类型，改善不同远程系统和 shell 环境下的兼容性。
+- SQL 查询新增无限结果模式和执行中取消能力。
+- 统一辅助窗口的关闭行为，并使用对应平台的标准窗口关闭快捷键。
+
+#### 修复与优化
+
+- 表数据导入支持事务执行与二进制安全处理，失败时可回滚，避免留下部分导入数据；SQL 导出现在也会正确保留二进制值。
+- 改善 SSH 多因素及 keyboard-interactive 认证流程，保留终端缓冲区并支持继续完成多步认证。
+- 修复终端长行在可见视口中的换行，以及调整窗口大小后的内容重新排版问题。
+- 限制 AI Chat 会话记录、缓存会话和工具信息的内存占用，提升长时间会话的稳定性。
+- 为远程桌面帧增量、扩展驱动 worker、Public MCP 审批队列、SSH 路径补全缓存和远程文件外部编辑会话增加容量或生命周期限制，降低长期运行时的资源堆积风险。
+- 优化大型 DML 执行后的数据库缓存失效判断，避免不必要地解析完整 SQL。
+- 修复表格复制选择可能超出有效列范围的问题。
+- 将 Redis 驱动最低兼容版本更新至 `0.1.4`，以支持原生 pipeline 与连接断开后的恢复能力。
+
+---
+
+### English
+
+#### What's New
+
+- Added terminal pane controls for splitting a terminal to the left, right, top, or bottom, with an option to restore a pane to a regular tab.
+- Added batch selection and management to the connection sidebar, including selecting visible connections, moving multiple connections to a group, and deleting them in one operation, with the related actions consolidated into the overflow menu.
+- Added configurable SSH terminal types for better compatibility with different remote systems and shell environments.
+- Added an unlimited-results mode and cancellation for running SQL queries.
+- Unified auxiliary-window close behavior and aligned shortcuts with each platform's standard window-close action.
+
+#### Fixes and Improvements
+
+- Made table imports transactional and binary-safe so failures can roll back without leaving partial data, and fixed SQL exports to preserve binary values correctly.
+- Improved SSH multi-factor and keyboard-interactive authentication by preserving terminal buffers and allowing multi-step authentication to continue.
+- Fixed terminal soft-wrapping within the visible viewport and content reflow after resizing the window.
+- Bounded AI Chat transcripts, cached sessions, and tool information to improve stability during long-running conversations.
+- Added capacity or lifecycle limits for remote-desktop frame deltas, extension-driver workers, Public MCP approval queues, SSH path-completion caches, and external remote-file editing sessions to reduce resource buildup during long-running use.
+- Optimized database cache invalidation after large DML statements by avoiding unnecessary full-SQL parsing.
+- Fixed table copy selections that could extend beyond the valid column range.
+- Updated the minimum compatible Redis driver version to `0.1.4` to support native pipelines and recovery after dropped connections.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.10.6...v0.10.7
+
+## [v0.10.6] - 2026-08-11
+
+### 中文
+
+#### 更新内容
+
+- 工作区文件浏览器新增文件和目录的剪切、复制、粘贴操作，并支持 macOS `Cmd-X/C/V` 与其他平台 `Ctrl-X/C/V` 快捷键。
+- 全面增强 SSH/SFTP 文件管理：本地与远程操作菜单改为更清晰的下拉菜单，补充文件剪贴板、远程命令执行、复制进度与取消，并重构服务器间复制流程，支持直传认证、自动配置源端 SSH key、保留 SSH proxy 设置以及仅中继模式。
+- SFTP 新增未知或变更主机密钥确认，可选择拒绝、仅本次接受或接受并保存；文件列表同时支持显示所有者用户名，并分别保存左右面板的隐藏列配置。
+- 降低远程桌面的显示延迟，优化帧呈现、纹理上传与资源回收流程，并支持从 macOS Finder 向远程桌面复制文件。
+- 数据库工作区查询支持在可用连接之间选择，并同步当前连接、数据库和 Schema 上下文；关闭未命名 SQL 查询时可选择取消、放弃保存或命名后保存。
+- SSH 终端支持在连接过程中请求运行时凭据；Agent 新增可配置的迭代次数上限，并改善聊天消息复制内容。
+
+#### 修复与优化
+
+- 修复 SSH 多因素认证过程中 OTP 提示可能丢失的问题。
+- 修复 SFTP 服务器直传可能卡住、缺少源端 key、丢失源端 SSH proxy 设置以及未知主机密钥无法处理等问题。
+- 工作区侧栏现在会持久化折叠状态并可隐藏空工作区，同时将工作区名称唯一性限制在同一父工作区内。
+- 修复表格多行复制时可能重复生成列的问题。
+- 修复 MCP 启动器必须预先解析 `npx` 路径的问题，现在会直接执行 `npx`。
+- 改善主页与 Tab 系统的兼容性，修复无 Tab、从主页切换或使用旧版主页导航时 Tab 栏和导航入口可能不可见的问题。
+- 修复流式执行 DDL 后 Schema 元数据缓存未及时失效的问题，并优化 SSH 连接表单的界面布局。
+
+---
+
+### English
+
+#### What's New
+
+- Added cut, copy, and paste for files and directories in the workspace explorer, with `Cmd-X/C/V` shortcuts on macOS and `Ctrl-X/C/V` on other platforms.
+- Expanded SSH/SFTP file management with clearer drop-down action menus, file clipboard operations, remote command execution, copy progress and cancellation, plus a reworked server-to-server copy flow with direct-transfer authentication, automatic source-side SSH key setup, preserved SSH proxy settings, and a relay-only mode.
+- Added confirmation for unknown or changed SFTP host keys, with reject, accept-once, and accept-and-save choices. File listings can also show owner usernames and persist hidden-column preferences independently for the left and right panes.
+- Reduced remote desktop display latency, optimized frame presentation, texture uploads, and resource cleanup, and added support for copying files from macOS Finder to a remote desktop session.
+- Workspace database queries can now select among available connections while synchronizing the active connection, database, and schema context. Closing an unnamed SQL query now offers cancel, discard, or save-with-a-name choices.
+- SSH terminals can request runtime credentials during connection. Agent settings now include a configurable iteration limit, and copied chat-message content has been improved.
+
+#### Fixes and Improvements
+
+- Fixed OTP prompts being lost during SSH multi-factor authentication.
+- Fixed direct SFTP server-to-server copies that could hang, omit source-side keys, lose source SSH proxy settings, or fail to handle unknown host keys.
+- Workspace sidebar collapse state is now persisted, empty workspaces can be hidden, and workspace-name uniqueness is scoped to the parent workspace.
+- Fixed duplicate columns being produced when copying multiple table rows.
+- Fixed MCP launcher startup by executing `npx` directly instead of requiring its path to be resolved first.
+- Improved compatibility between the home page and the tab system, fixing cases where the tab bar or navigation entry could disappear with no tabs or while switching from the legacy home page.
+- Fixed stale schema metadata after streaming DDL execution and improved the SSH connection form layout.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.10.5...v0.10.6
+
 ## [v0.10.5] - 2026-08-07
 
 ### 中文

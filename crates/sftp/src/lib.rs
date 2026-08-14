@@ -1,9 +1,13 @@
 rust_i18n::i18n!("locales", fallback = "en");
 
-mod direct_copy;
-mod direct_copy_scripts;
+mod file_operations;
+mod remote_exec;
+mod remote_file_command;
 mod russh_impl;
 mod server_copy;
+mod server_copy_auth;
+mod server_copy_command;
+mod server_copy_direct;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -12,10 +16,15 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
 
+pub use file_operations::{
+    calculate_directory_size, remote_path_is_same_or_descendant, total_file_size,
+};
+pub use remote_file_command::{RemoteFileOperation, build_remote_file_command};
 pub use russh_impl::RusshSftpClient;
 pub use server_copy::{
-    CopyPlanEntry, CopyStrategy, ServerCopyItem, ServerCopyRequest, choose_copy_strategy,
-    copy_between_servers, join_copy_path, relay_copy,
+    CopyPlanEntry, DirectCopyApproval, DirectCopyApprovalFuture, DirectCopyDecision,
+    DirectCopyPreview, DirectCopyStrategy, ServerCopyItem, ServerCopyRequest, copy_between_servers,
+    join_copy_path, relay_copy,
 };
 
 #[derive(Debug, Clone)]
@@ -26,6 +35,24 @@ pub struct FileEntry {
     pub modified: SystemTime,
     pub is_dir: bool,
     pub permissions: u32,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub user: Option<String>,
+    pub group: Option<String>,
+}
+
+impl FileEntry {
+    /// Returns the owner reported by the remote server.
+    ///
+    /// SFTP v3 servers commonly expose only a numeric UID. When the remote user
+    /// name is available, prefer it and keep the UID only as a fallback.
+    pub fn owner_display(&self) -> Option<String> {
+        match (&self.user, self.uid) {
+            (Some(user), _) if !user.is_empty() => Some(user.clone()),
+            (_, Some(uid)) => Some(uid.to_string()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +79,13 @@ pub struct TransferProgress {
     pub current_file: Option<String>,
     pub current_file_transferred: u64,
     pub current_file_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DirectoryConflictPolicy {
+    #[default]
+    Merge,
+    Replace,
 }
 
 #[derive(Debug)]
@@ -144,6 +178,7 @@ pub trait SftpClient: Send + Sync {
         &mut self,
         local_path: &str,
         remote_path: &str,
+        conflict_policy: DirectoryConflictPolicy,
         cancelled: Arc<AtomicBool>,
         progress: ProgressCallback,
     ) -> Result<()>;
@@ -156,7 +191,23 @@ pub trait SftpClient: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_read_size;
+    use super::{FileEntry, validate_read_size};
+    use std::time::SystemTime;
+
+    fn file_entry(user: Option<&str>, uid: Option<u32>) -> FileEntry {
+        FileEntry {
+            name: "file".to_string(),
+            path: "/file".to_string(),
+            size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            is_dir: false,
+            permissions: 0,
+            uid,
+            gid: None,
+            user: user.map(str::to_string),
+            group: None,
+        }
+    }
 
     #[test]
     fn validate_read_size_allows_files_within_limit() {
@@ -168,5 +219,22 @@ mod tests {
     fn validate_read_size_rejects_files_larger_than_limit() {
         let error = validate_read_size(1025, 1024).expect_err("应拒绝超限文件");
         assert!(error.to_string().contains("exceeds max readable size"));
+    }
+
+    #[test]
+    fn owner_display_prefers_server_user_name() {
+        assert_eq!(
+            Some("deploy".to_string()),
+            file_entry(Some("deploy"), Some(1001)).owner_display()
+        );
+    }
+
+    #[test]
+    fn owner_display_falls_back_to_numeric_uid() {
+        assert_eq!(
+            Some("1001".to_string()),
+            file_entry(None, Some(1001)).owner_display()
+        );
+        assert_eq!(None, file_entry(None, None).owner_display());
     }
 }

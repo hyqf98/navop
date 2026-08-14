@@ -16,11 +16,17 @@ fn rendered_frame_uses_a_parent_bounded_canvas_without_intrinsic_image_layout() 
         !canvas.contains("window.handle_input("),
         "remote desktops must not register the local platform IME"
     );
-    assert!(canvas.contains("window.paint_image("));
-    assert!(
-        canvas.matches("window.paint_image(").count() >= 2,
-        "framebuffer and remote cursor must be painted in the same bounded canvas"
+    assert!(canvas.contains("window.update_dynamic_texture("));
+    assert_eq!(
+        1,
+        canvas.matches("window.paint_dynamic_texture(").count(),
+        "the framebuffer must be painted as one dynamic texture"
     );
+    assert!(
+        canvas.matches("window.paint_image(").count() == 1,
+        "only the remote cursor should use the RenderImage paint path"
+    );
+    assert!(!canvas.contains("for tile in frame.tiles()"));
     assert!(canvas.contains(".absolute()"));
     assert!(canvas.contains(".inset_0()"));
     assert!(canvas.contains(".size_full()"));
@@ -41,6 +47,8 @@ fn rendered_frame_uses_a_parent_bounded_canvas_without_intrinsic_image_layout() 
         frame_paint < cursor_paint,
         "the remote cursor must be painted over the framebuffer"
     );
+    assert!(source.contains("window.drop_dynamic_texture("));
+    assert!(source.contains("window.drop_image("));
 
     assert_parent_bounded_remote_desktop_content(&source);
 }
@@ -603,14 +611,17 @@ fn windows_native_shutdown_uses_locked_gpui_context_contracts() {
 fn windows_native_events_are_drained_on_the_gpui_owner_thread() {
     let view = include_str!("../view.rs").replace("\r\n", "\n");
     let native = include_str!("windows_native.rs").replace("\r\n", "\n");
+    let integration = include_str!("windows_native_display_integration.rs").replace("\r\n", "\n");
 
     let poll_task = function_body(
-        &view,
-        "let output_poll_task = cx.spawn",
-        "cx.on_release(move |this, cx|",
+        &integration,
+        "pub(super) fn spawn_windows_native_maintenance_task",
+        "pub(super) fn observe_windows_native_viewport",
     );
+    assert!(poll_task.contains("cx.spawn"));
+    assert!(poll_task.contains("this.uses_windows_native_presentation()"));
     assert!(poll_task.contains("this.poll_windows_native_events()"));
-    assert!(poll_task.contains("native_event_window_handle.update"));
+    assert!(poll_task.contains("window_handle.update"));
     assert!(poll_task.contains("window.focus(&focus_handle, cx);"));
 
     let poll = function_body(
@@ -638,7 +649,7 @@ fn presentation_initialization_precedes_and_gates_canvas_runtime_start() {
         .find("self.ensure_presentation(window, cx);")
         .expect("presentation initialization");
     let flush = render
-        .find("self.flush_pending_start();")
+        .find("self.flush_pending_start(cx);")
         .expect("pending Canvas start");
     assert!(
         ensure < flush,
@@ -758,7 +769,13 @@ fn explicit_canvas_retry_requires_confirmed_native_cleanup_and_defers_runtime_st
     assert!(retry_gate < native_guard);
     assert!(native_guard < close_canvas);
     assert!(close_canvas < select_canvas);
-    assert!(retry.contains("self.output_rx = None;"));
+    assert!(retry.contains("self.output_rx.take();"));
+    assert!(retry.contains("self.presentation_tx.take();"));
+    assert!(retry.contains("self.presentation_queue.clear();"));
+    assert!(retry.contains("self.presentation_in_flight = false;"));
+    assert!(retry.contains("self.reset_presentation_pacing();"));
+    assert!(retry.contains("self._output_ready_task.take();"));
+    assert!(retry.contains("self._presentation_task.take();"));
     assert!(retry.contains("fallback_reason: None"));
     assert!(retry.contains("self.failure_detail = None;"));
     assert!(retry.contains("cx.notify();"));
@@ -833,7 +850,7 @@ fn rdp_presentation_status_stays_outside_the_native_child_bounds() {
         .expect("remote desktop root")..];
     assert!(root.contains(".flex()\n            .flex_col()"));
     assert!(source.contains(".on_prepaint(move |bounds, window, cx|"));
-    assert!(source.contains("view.update_content_bounds(bounds, window.scale_factor())"));
+    assert!(source.contains("view.update_content_bounds(bounds, window.scale_factor(), cx)"));
     assert!(!root.contains(".on_children_prepainted("));
     let status = root
         .find(".when(show_presentation_status")
@@ -941,7 +958,7 @@ fn assert_parent_bounded_remote_desktop_content(source: &str) {
 
     for constraint in [
         ".w_full()",
-        ".flex_grow(1.0)",
+        ".flex_grow()",
         ".min_w_0()",
         ".min_h_0()",
         ".relative()",
@@ -978,7 +995,7 @@ fn assert_parent_bounded_remote_desktop_content(source: &str) {
         assert!(root.contains(constraint));
     }
     assert!(content.contains(".on_prepaint(move |bounds, window, cx|"));
-    assert!(content.contains("view.update_content_bounds(bounds, window.scale_factor())"));
+    assert!(content.contains("view.update_content_bounds(bounds, window.scale_factor(), cx)"));
     assert!(!root.contains(".on_children_prepainted("));
 }
 
@@ -1038,7 +1055,9 @@ fn reconnect_status_uses_a_transient_notification_outside_tab_content() {
     assert!(notifications.contains("Notification::info(message)"));
     assert!(notifications.contains("localized_reconnect_notification("));
     assert!(!notifications.contains("localized_reconnect_status("));
-    assert!(output.contains("self.reset_session_state(None, SessionResetReason::Reconnecting)"));
+    assert!(
+        output.contains("self.reset_session_state(None, SessionResetReason::Reconnecting, cx)")
+    );
     assert!(output.contains("self.notify_reconnecting(reconnect, window, cx)"));
     assert!(!output.contains("RemoteDesktopOutput::Reconnecting(message)"));
     assert!(notifications.contains(".id1::<RemoteDesktopReconnectNotification>("));
@@ -1058,4 +1077,31 @@ fn session_takeover_notifies_the_user_and_requests_tab_close_without_reconnectin
     assert!(notifications.contains("Notification::warning(message)"));
     assert!(notifications.contains("RemoteDesktopSessionNotification"));
     assert!(notifications.contains("localized_session_taken_over"));
+}
+
+#[test]
+fn remote_output_wakes_render_without_fixed_interval_polling() {
+    let view = include_str!("../view.rs");
+    let output = include_str!("output.rs");
+
+    assert!(
+        !view.contains("Duration::from_millis(33)"),
+        "remote output must not wait for the former 33ms render polling interval"
+    );
+    assert!(
+        !view.contains("_output_poll_task"),
+        "the fixed-interval output polling task must stay removed"
+    );
+    assert!(
+        output.contains("runtime.output_rx.subscribe()"),
+        "the view must subscribe to mailbox output-ready events"
+    );
+    assert!(
+        output.contains("output_ready.wait().await"),
+        "the view must wait for mailbox output-ready events"
+    );
+    assert!(
+        output.contains("this.update(cx, |_, cx| cx.notify())"),
+        "mailbox output-ready events must request a GPUI render"
+    );
 }

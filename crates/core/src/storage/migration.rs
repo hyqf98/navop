@@ -74,6 +74,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "20260727000001",
         include_str!("../../migrations/20260727000001_connection_credential_revision.sql"),
     ),
+    (
+        "20260810000001",
+        include_str!("../../migrations/20260810000001_workspace_sidebar_collapsed.sql"),
+    ),
+    (
+        "20260810000002",
+        include_str!("../../migrations/20260810000002_workspace_sibling_names.sql"),
+    ),
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
@@ -125,6 +133,25 @@ mod tests {
     use super::{MIGRATIONS, run_migrations};
     use rusqlite::{Connection, params};
 
+    fn mark_all_migrations_except(conn: &Connection, target_version: &str) {
+        let mut found_target = false;
+        for (version, _) in MIGRATIONS {
+            if *version == target_version {
+                found_target = true;
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO _migrations (version, applied_at) VALUES (?1, ?2)",
+                params![version, 1i64],
+            )
+            .expect("mark unrelated migration as applied");
+        }
+        assert!(
+            found_target,
+            "migration {target_version} must be registered"
+        );
+    }
+
     #[test]
     fn credential_revision_migration_backfills_existing_connections() {
         let conn = Connection::open_in_memory().expect("open in-memory database");
@@ -141,13 +168,7 @@ mod tests {
         )
         .expect("create pre-migration schema");
 
-        for (version, _) in &MIGRATIONS[..MIGRATIONS.len() - 1] {
-            conn.execute(
-                "INSERT INTO _migrations (version, applied_at) VALUES (?1, ?2)",
-                params![version, 1i64],
-            )
-            .expect("mark preceding migration as applied");
-        }
+        mark_all_migrations_except(&conn, "20260727000001");
 
         run_migrations(&conn).expect("run credential revision migration");
 
@@ -167,5 +188,151 @@ mod tests {
             .is_err(),
             "the positive revision invariant must be enforced by SQLite"
         );
+    }
+
+    #[test]
+    fn workspace_sidebar_collapsed_migration_defaults_existing_rows_to_expanded() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE _migrations (
+                version TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            );
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL
+            );
+            INSERT INTO workspaces (name) VALUES ('existing');",
+        )
+        .expect("create pre-migration schema");
+
+        mark_all_migrations_except(&conn, "20260810000001");
+        run_migrations(&conn).expect("run workspace sidebar collapsed migration");
+
+        let collapsed: i64 = conn
+            .query_row(
+                "SELECT sidebar_collapsed FROM workspaces WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read workspace sidebar collapsed state");
+        assert_eq!(0, collapsed);
+
+        run_migrations(&conn).expect("rerun migrations");
+    }
+
+    #[test]
+    fn workspace_sibling_name_migration_scopes_uniqueness_to_parent() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+            CREATE TABLE _migrations (
+                version TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            );
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color TEXT,
+                icon TEXT,
+                cloud_id TEXT,
+                last_synced_at INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                parent_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL,
+                sidebar_collapsed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_workspaces_name ON workspaces(name);
+            CREATE INDEX idx_workspaces_cloud_id ON workspaces(cloud_id);
+            CREATE INDEX idx_workspaces_parent_id ON workspaces(parent_id);
+            CREATE TABLE connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL
+            );
+            INSERT INTO workspaces
+                (id, name, sort_order, created_at, updated_at, parent_id, sidebar_collapsed)
+            VALUES
+                (1, 'first parent', 0, 1, 1, NULL, 0),
+                (2, 'second parent', 1, 1, 1, NULL, 0),
+                (3, 'servers', 2, 1, 1, 1, 1);
+            INSERT INTO connections (workspace_id) VALUES (3);",
+        )
+        .expect("create pre-migration schema");
+
+        mark_all_migrations_except(&conn, "20260810000002");
+        run_migrations(&conn).expect("run workspace sibling name migration");
+
+        conn.execute(
+            "INSERT INTO workspaces
+                (name, sort_order, created_at, updated_at, parent_id)
+             VALUES ('servers', 3, 1, 1, 2)",
+            [],
+        )
+        .expect("allow the same name under a different parent");
+        conn.execute(
+            "INSERT INTO workspaces
+                (name, sort_order, created_at, updated_at, parent_id)
+             VALUES ('servers', 4, 1, 1, NULL)",
+            [],
+        )
+        .expect("allow a root workspace to share a child workspace name");
+        assert!(
+            conn.execute(
+                "INSERT INTO workspaces
+                    (name, sort_order, created_at, updated_at, parent_id)
+                 VALUES ('servers', 5, 1, 1, 1)",
+                [],
+            )
+            .is_err(),
+            "duplicate sibling names must remain rejected"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO workspaces
+                    (name, sort_order, created_at, updated_at, parent_id)
+                 VALUES ('servers', 6, 1, 1, NULL)",
+                [],
+            )
+            .is_err(),
+            "duplicate root workspace names must remain rejected"
+        );
+        assert!(
+            conn.execute("UPDATE workspaces SET parent_id = 1 WHERE id = 4", [],)
+                .is_err(),
+            "moving a workspace must enforce the target parent's name scope"
+        );
+
+        let connection_workspace_id: i64 = conn
+            .query_row(
+                "SELECT workspace_id FROM connections WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read preserved connection workspace");
+        assert_eq!(3, connection_workspace_id);
+        assert_eq!(
+            1,
+            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .expect("read foreign key mode")
+        );
+        assert_eq!(
+            0,
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+                .expect("check foreign keys")
+        );
+        assert_eq!(
+            (Some(1), 1),
+            conn.query_row(
+                "SELECT parent_id, sidebar_collapsed FROM workspaces WHERE id = 3",
+                [],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read preserved workspace hierarchy and collapsed state")
+        );
+
+        run_migrations(&conn).expect("rerun migrations");
     }
 }

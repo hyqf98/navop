@@ -1,6 +1,26 @@
 _version: 2
 
 TerminalWorkspace:
+  split:
+    en: Split Terminal
+    zh-CN: 终端分屏
+    zh-HK: 終端分屏
+  split_left:
+    en: Split Left
+    zh-CN: 向左分屏
+    zh-HK: 向左分屏
+  split_right:
+    en: Split Right
+    zh-CN: 向右分屏
+    zh-HK: 向右分屏
+  split_top:
+    en: Split Top
+    zh-CN: 向上分屏
+    zh-HK: 向上分屏
+  split_bottom:
+    en: Split Bottom
+    zh-CN: 向下分屏
+    zh-HK: 向下分屏
   cancel_split:
     en: Cancel Split and Return to Tab Bar
     zh-CN: 取消分屏并返回标签栏
@@ -165,6 +185,14 @@ SSH:
     en: Enter username
     zh-CN: 请输入用户名
     zh-HK: 請輸入用戶名
+  save_username_desc:
+    en: Save username
+    zh-CN: 保存用户名
+    zh-HK: 儲存使用者名稱
+  save_username_hint:
+    en: Save the username for future connections. When disabled, enter it again before connecting.
+    zh-CN: 保存用户名以便后续连接使用；关闭后，连接前需要重新输入用户名。
+    zh-HK: 儲存使用者名稱供後續連線使用；關閉後，連線前需要重新輸入使用者名稱。
   password:
     en: Password
     zh-CN: 密码
@@ -173,6 +201,18 @@ SSH:
     en: Enter password
     zh-CN: 请输入密码
     zh-HK: 請輸入密碼
+  save_password_desc:
+    en: Save password
+    zh-CN: 保存密码
+    zh-HK: 儲存密碼
+  save_password_enabled_hint:
+    en: The password is encrypted locally. If sync is enabled, only encrypted connection data is synchronized.
+    zh-CN: 密码会在本地加密保存；启用同步后，仅同步加密后的连接数据。
+    zh-HK: 密碼會在本機加密儲存；啟用同步後，只會同步加密後的連線資料。
+  save_password_disabled_hint:
+    en: The password will not be saved. Enter it on the first connection and every manual reconnect.
+    zh-CN: 密码不会保存；首次连接及每次手动重连时都需要重新输入。
+    zh-HK: 密碼不會儲存；首次連線及每次手動重新連線時都需要重新輸入。
   private_key:
     en: Private Key File
     zh-CN: 私钥文件
@@ -217,10 +257,26 @@ SSH:
     en: Authentication Method
     zh-CN: 认证方式
     zh-HK: 認證方式
+  keyboard_interactive:
+    en: Two-factor authentication
+    zh-CN: 双因素认证
+    zh-HK: 雙因素認證
+  enable:
+    en: Enable
+    zh-CN: 启用
+    zh-HK: 啟用
+  keyboard_interactive_desc:
+    en: Allow Keyboard-Interactive prompts such as OTP, hardware tokens, and challenge-response.
+    zh-CN: 允许服务器通过 Keyboard-Interactive 请求 OTP、硬件令牌或质询响应。
+    zh-HK: 允許伺服器透過 Keyboard-Interactive 要求 OTP、硬件權杖或質詢回應。
   terminal_encoding:
     en: Terminal Encoding
     zh-CN: 终端字符集
     zh-HK: 終端字元集
+  terminal_type:
+    en: Terminal Type
+    zh-CN: 终端类型
+    zh-HK: 終端類型
   auto_publickey_hint:
     en: Try SSH Agent first, then default private keys under ~/.ssh.
     zh-CN: 将优先尝试 SSH Agent，若不可用则尝试 ~/.ssh 下的默认私钥。
@@ -1586,6 +1642,22 @@ SshSession:
     en: SSH Authentication Required
     zh-CN: 需要完成 SSH 身份验证
     zh-HK: 需要完成 SSH 身分驗證
+  credentials_required:
+    en: SSH Credentials Required
+    zh-CN: 需要 SSH 连接凭据
+    zh-HK: 需要 SSH 連線憑據
+  credentials_hint:
+    en: This connection does not save the following credentials. Enter them to continue.
+    zh-CN: 此连接未保存以下凭据，请输入后继续连接。
+    zh-HK: 此連線未儲存以下憑據，請輸入後繼續連線。
+  username:
+    en: Username
+    zh-CN: 用户名
+    zh-HK: 使用者名稱
+  password:
+    en: Password
+    zh-CN: 密码
+    zh-HK: 密碼
   reconnected_new_shell:
     en: Reconnected. A new remote shell was opened below the preserved terminal output.
     zh-CN: 已重新连接并打开新的远端 Shell，之前的终端内容已保留。
@@ -1701,6 +1773,94 @@ FileManager:
     en: CD in Terminal
     zh-CN: 在终端中 CD
     zh-HK: 在終端中 CD
+  copy:
+    en: Copy
+    zh-CN: 复制
+    zh-HK: 複製
+  cut:
+    en: Cut
+    zh-CN: 剪切
+    zh-HK: 剪下
+  paste:
+    en: Paste
+    zh-CN: 粘贴
+    zh-HK: 貼上
+  properties:
+    en: Properties
+    zh-CN: 属性
+    zh-HK: 屬性
+  calculate:
+    en: Calculate
+    zh-CN: 计算
+    zh-HK: 計算
+  calculating:
+    en: Calculating…
+    zh-CN: 计算中…
+    zh-HK: 計算中…
+  property_name:
+    en: Name
+    zh-CN: 名称
+    zh-HK: 名稱
+  property_path:
+    en: Path
+    zh-CN: 路径
+    zh-HK: 路徑
+  property_type:
+    en: Type
+    zh-CN: 类型
+    zh-HK: 類型
+  property_file:
+    en: File
+    zh-CN: 文件
+    zh-HK: 文件
+  property_folder:
+    en: Folder
+    zh-CN: 文件夹
+    zh-HK: 文件夾
+  property_size:
+    en: Size
+    zh-CN: 大小
+    zh-HK: 大小
+  property_modified:
+    en: Modified
+    zh-CN: 修改时间
+    zh-HK: 修改時間
+  property_permissions:
+    en: Permissions
+    zh-CN: 权限
+    zh-HK: 權限
+  property_owner:
+    en: Owner
+    zh-CN: 拥有者
+    zh-HK: 擁有者
+  copy_ready:
+    en: Files copied. Choose a destination and paste.
+    zh-CN: 已复制文件，请选择目标位置后粘贴
+    zh-HK: 已複製文件，請選擇目標位置後貼上
+  cut_ready:
+    en: Files cut. Choose a destination and paste.
+    zh-CN: 已剪切文件，请选择目标位置后粘贴
+    zh-HK: 已剪下文件，請選擇目標位置後貼上
+  paste_success:
+    en: Paste completed
+    zh-CN: 粘贴完成
+    zh-HK: 貼上完成
+  clipboard_empty:
+    en: No files have been copied or cut
+    zh-CN: 尚未复制或剪切文件
+    zh-HK: 尚未複製或剪下文件
+  invalid_paste_target:
+    en: A folder cannot be pasted into itself or one of its descendants
+    zh-CN: 文件夹不能粘贴到自身或其子目录
+    zh-HK: 文件夾不能貼上到自身或其子目錄
+  paste_failed:
+    en: "Paste failed: %{error}"
+    zh-CN: "粘贴失败：%{error}"
+    zh-HK: "貼上失敗：%{error}"
+  calculate_size_failed:
+    en: "Failed to calculate folder size: %{error}"
+    zh-CN: "计算文件夹大小失败：%{error}"
+    zh-HK: "計算文件夾大小失敗：%{error}"
   copy_path:
     en: Copy Path
     zh-CN: 复制路径

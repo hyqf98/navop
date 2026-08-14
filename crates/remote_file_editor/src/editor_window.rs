@@ -23,6 +23,7 @@ use one_core::{
     gpui_tokio::Tokio,
     keybindings::{action_id, rebind_keybindings, shortcuts_for},
     popup_window::{PopupWindowOptions, open_popup_window},
+    window_close::set_window_close_handler,
 };
 use rust_i18n::t;
 use sftp::{RusshSftpClient, SftpClient};
@@ -85,6 +86,7 @@ pub fn open_remote_file_editor<T: 'static>(
                         window: window.window_handle(),
                         view: view.downgrade(),
                     });
+                    register_window_close_handler(window.window_handle(), view.downgrade(), cx);
                     view
                 },
                 cx,
@@ -146,6 +148,39 @@ fn clear_editor_window() {
     if let Ok(mut slot) = editor_window_slot().lock() {
         *slot = None;
     }
+}
+
+fn register_window_close_handler(
+    window_handle: AnyWindowHandle,
+    view: WeakEntity<RemoteFileEditorWindow>,
+    cx: &mut App,
+) {
+    set_window_close_handler(
+        window_handle,
+        move |window_handle, cx| request_editor_window_close(window_handle, view.clone(), cx),
+        cx,
+    );
+}
+
+fn request_editor_window_close(
+    window_handle: AnyWindowHandle,
+    view: WeakEntity<RemoteFileEditorWindow>,
+    cx: &mut App,
+) {
+    cx.defer(move |cx| {
+        let result = window_handle.update(cx, |_, window, cx| {
+            if view
+                .update(cx, |this, cx| this.request_close_window(window, cx))
+                .is_err()
+            {
+                clear_editor_window();
+                window.remove_window();
+            }
+        });
+        if result.is_err() {
+            clear_editor_window();
+        }
+    });
 }
 
 fn init_keybindings(cx: &mut App) {
@@ -660,6 +695,12 @@ impl RemoteFileEditorWindow {
                 self.show_unsaved_changes_prompt(PendingCloseAction::Window, window, cx);
                 false
             }
+        }
+    }
+
+    fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_window_should_close(window, cx) {
+            window.remove_window();
         }
     }
 

@@ -3,20 +3,18 @@ use std::ops::Range;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{AnyElement, IntoElement, ListSizingBehavior, ParentElement, Styled, div, uniform_list};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, IconSize, Sizable, StyledExt,
-    button::{IconButton, IconButtonRole},
-    h_flex,
+    ActiveTheme as _, Icon, IconName, IconSize, Sizable, StyledExt, h_flex,
     input::{Input, LocalInputStyle},
     v_flex,
 };
 use rust_i18n::t;
 
+use super::batch_toolbar::batch_mode_toggle;
 use super::tree_model::{
     ConnectionNodeInput, ConnectionTreeRow, WorkspaceNodeInput, build_connection_tree_rows,
-    filter_connection_tree_inputs,
+    filter_connection_tree_inputs, hide_empty_workspace_inputs,
 };
 use super::{PersistentConnectionSidebar, SidebarPalette};
-use crate::home::home_workspace_filter::{WorkspaceDialogConfig, show_workspace_dialog};
 
 impl PersistentConnectionSidebar {
     pub(super) fn render_connection_tree(
@@ -38,6 +36,9 @@ impl PersistentConnectionSidebar {
             .text_color(palette.foreground)
             .child(self.render_tree_header(palette, cx))
             .child(self.render_tree_search(palette, cx))
+            .when(self.connection_selection.is_active(), |tree| {
+                tree.child(self.render_batch_toolbar(&rows, palette, cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -66,9 +67,15 @@ impl PersistentConnectionSidebar {
             .into_any_element()
     }
 
-    fn tree_rows(&self, cx: &gpui::App) -> Vec<ConnectionTreeRow> {
+    pub(super) fn tree_rows(&self, cx: &gpui::App) -> Vec<ConnectionTreeRow> {
         let home = self.home_page.read(cx);
         let query = self.search_input.read(cx).value().trim().to_lowercase();
+        let collapsed_workspaces = home
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.sidebar_collapsed)
+            .filter_map(|workspace| workspace.id)
+            .collect::<std::collections::HashSet<_>>();
         let mut workspaces = home
             .workspaces
             .iter()
@@ -100,6 +107,9 @@ impl PersistentConnectionSidebar {
         filter_connection_tree_inputs(&mut workspaces, &mut connections, &query, |connection| {
             matching_connection_ids.contains(&connection.id)
         });
+        if self.hide_empty_workspaces {
+            hide_empty_workspace_inputs(&mut workspaces, &connections);
+        }
         let searching = !query.is_empty();
         let expanded_workspaces = std::collections::HashSet::new();
         build_connection_tree_rows(
@@ -108,12 +118,7 @@ impl PersistentConnectionSidebar {
             if searching {
                 &expanded_workspaces
             } else {
-                &self.collapsed_workspaces
-            },
-            if searching {
-                false
-            } else {
-                self.unassigned_collapsed
+                &collapsed_workspaces
             },
         )
     }
@@ -156,8 +161,6 @@ impl PersistentConnectionSidebar {
     }
 
     fn render_tree_header(&self, palette: SidebarPalette, cx: &gpui::Context<Self>) -> AnyElement {
-        let home_for_new = self.home_page.clone();
-        let home_for_refresh = self.home_page.clone();
         let connection_count = {
             let home = self.home_page.read(cx);
             home.connections
@@ -165,7 +168,8 @@ impl PersistentConnectionSidebar {
                 .filter(|connection| home.match_connection_type(connection))
                 .count()
         };
-        let view = cx.entity();
+        let view_for_batch = cx.entity();
+        let view_for_actions = cx.entity();
         let layout = cx.theme().geometry.layout;
         h_flex()
             .w_full()
@@ -216,57 +220,14 @@ impl PersistentConnectionSidebar {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(
-                        IconButton::new("persistent-collapse-all-groups", IconName::ChevronsUpDown)
-                            .role(IconButtonRole::Compact)
-                            .text_color(palette.foreground)
-                            .tooltip(t!("Connection.collapse_all"))
-                            .on_click(move |_, _, cx| {
-                                view.update(cx, |this, cx| this.collapse_all_groups(cx));
-                            }),
-                    )
-                    .child(
-                        IconButton::new("persistent-new-root-group", IconName::FolderOpen)
-                            .role(IconButtonRole::Compact)
-                            .text_color(palette.foreground)
-                            .tooltip(t!("Workspace.new"))
-                            .on_click(move |_, window, cx| {
-                                let sort_order = home_for_new.read(cx).workspaces.len() as i32;
-                                show_workspace_dialog(
-                                    home_for_new.clone(),
-                                    WorkspaceDialogConfig {
-                                        initial_sort_order: Some(sort_order),
-                                        ..Default::default()
-                                    },
-                                    window,
-                                    cx,
-                                );
-                            }),
-                    )
-                    .child(
-                        IconButton::new("persistent-refresh-connections", IconName::Refresh)
-                            .role(IconButtonRole::Compact)
-                            .text_color(palette.foreground)
-                            .tooltip(t!("Home.refresh"))
-                            .on_click(move |_, _, cx| {
-                                home_for_refresh
-                                    .update(cx, |home, cx| home.refresh_local_home_data(cx));
-                            }),
-                    ),
+                    .child(batch_mode_toggle(
+                        view_for_batch,
+                        self.connection_selection.is_active(),
+                        palette,
+                    ))
+                    .child(self.header_actions_menu(view_for_actions, palette)),
             )
             .into_any_element()
-    }
-
-    fn collapse_all_groups(&mut self, cx: &mut gpui::Context<Self>) {
-        self.collapsed_workspaces = self
-            .home_page
-            .read(cx)
-            .workspaces
-            .iter()
-            .filter_map(|workspace| workspace.id)
-            .collect();
-        self.unassigned_collapsed = true;
-        cx.notify();
     }
 }
 
@@ -277,5 +238,16 @@ mod tests {
         let source = include_str!("tree.rs");
         assert!(source.contains("cfg!(target_os = \"macos\")"));
         assert!(source.contains("layout.macos_compact_title_bar_content_padding"));
+    }
+
+    #[test]
+    fn connection_header_routes_secondary_actions_through_overflow_menu() {
+        let source = include_str!("tree.rs");
+        let implementation = source.split("#[cfg(test)]").next().unwrap();
+        assert!(implementation.contains("header_actions_menu("));
+        assert!(!implementation.contains("persistent-collapse-all-groups"));
+        assert!(!implementation.contains("persistent-hide-empty-workspaces"));
+        assert!(!implementation.contains("persistent-new-root-group"));
+        assert!(!implementation.contains("persistent-refresh-connections"));
     }
 }

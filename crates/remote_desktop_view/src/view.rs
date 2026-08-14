@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, atomic::AtomicU64};
 use std::time::{Duration, Instant};
 
 #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon, IconName};
@@ -13,7 +13,7 @@ use remote_desktop::{
     RemoteDesktopCapabilities, RemoteDesktopConnectionOptions, RemoteDesktopFailure,
     RemoteDesktopInput, RemoteDesktopOutput, RemoteDesktopProtocol,
     RemoteDesktopProviderVersionError, RemoteDesktopRuntime, RemoteDesktopSize, RemoteKey,
-    RemoteMouseButton, RemoteNamedKey, ResizeSupport, RgbaFramebuffer, create_backend,
+    RemoteMouseButton, RemoteNamedKey, ResizeSupport, create_backend,
 };
 use rust_i18n::t;
 
@@ -26,6 +26,8 @@ use crate::shortcuts::{
 use crate::view::frame_lifecycle::RenderedFrameLifecycle;
 
 mod clipboard;
+#[cfg(target_os = "macos")]
+mod clipboard_macos;
 mod cursor;
 mod frame_lifecycle;
 mod frame_sync;
@@ -50,6 +52,7 @@ mod render;
 mod resize;
 // Pure lifecycle/bounds tests run cross-platform; the production adapter and
 // sink are only constructed by the Windows native-RDP build.
+mod surface;
 #[allow(dead_code)]
 mod windows_native;
 #[allow(dead_code)]
@@ -60,8 +63,9 @@ mod windows_native_display_integration;
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(800);
 const RESIZE_MIN_INTERVAL: Duration = Duration::from_millis(1200);
 const RESIZE_DELTA_THRESHOLD: u16 = 16;
-const RDP_INITIAL_LAYOUT_DEBOUNCE: Duration = Duration::from_millis(800);
+const RDP_INITIAL_LAYOUT_DEBOUNCE: Duration = Duration::from_millis(150);
 const REMOTE_DESKTOP_CONTEXT: &str = "RemoteDesktopView";
+const REMOTE_DESKTOP_DIAGNOSTICS_ENV: &str = "NAVOP_REMOTE_DESKTOP_DIAGNOSTICS";
 #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
 const WINDOWS_NATIVE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
@@ -241,11 +245,15 @@ pub struct RemoteDesktopView {
     title: String,
     input_tx: Option<tokio::sync::mpsc::UnboundedSender<RemoteDesktopInput>>,
     output_rx: Option<remote_desktop::output_mailbox::OutputMailboxReceiver>,
+    presentation_tx: Option<tokio::sync::mpsc::UnboundedSender<presentation::PresentationCommand>>,
+    presentation_queue: presentation::PresentationQueue,
+    presentation_in_flight: bool,
+    presentation_pacer: presentation::PresentationPacer,
+    latest_presentation_frame_ticket: Arc<AtomicU64>,
     focus_handle: FocusHandle,
-    latest_frame: Option<Arc<RenderImage>>,
-    framebuffer: Option<RgbaFramebuffer>,
-    rendered_frames: RenderedFrameLifecycle<Arc<RenderImage>>,
-    pending_frame_drops: Vec<Arc<RenderImage>>,
+    latest_frame: Option<Arc<surface::RemoteDesktopSurface>>,
+    rendered_frames: RenderedFrameLifecycle<Arc<surface::RemoteDesktopSurface>>,
+    retired_textures: surface::RetiredTextureQueue,
     cursor: cursor::RemoteCursorState,
     frame_sync: frame_sync::FrameSyncTracker,
     capabilities: Option<RemoteDesktopCapabilities>,
@@ -276,7 +284,16 @@ pub struct RemoteDesktopView {
     native_event_state: Option<native_events::NativeRdpEventState>,
     #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
     windows_native_display: windows_native_display::WindowsNativeDisplayState,
-    _output_poll_task: Task<()>,
+    #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+    _windows_native_maintenance_task: Task<()>,
+    startup_started_at: Instant,
+    runtime_started_at: Option<Instant>,
+    startup_connected_logged: bool,
+    startup_frame_logged: bool,
+    _initial_layout_task: Option<Task<()>>,
+    _output_ready_task: Option<Task<()>>,
+    _presentation_task: Option<Task<()>>,
+    _presentation_pacing_task: Option<Task<()>>,
 }
 
 impl RemoteDesktopView {
@@ -295,38 +312,20 @@ impl RemoteDesktopView {
         };
         let focus_handle = cx.focus_handle();
         #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-        let native_event_window_handle = window_handle.clone();
-        let output_poll_task = cx.spawn(async move |this, cx| {
-            loop {
-                #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-                {
-                    let focus_handle = match this.update(cx, |this, cx| {
-                        let focus_handle = this.poll_windows_native_events();
-                        this.flush_windows_native_display_settings(Instant::now());
-                        cx.notify();
-                        focus_handle
-                    }) {
-                        Ok(focus_handle) => focus_handle,
-                        Err(_) => break,
-                    };
-                    if let Some(focus_handle) = focus_handle {
-                        let _ = native_event_window_handle.update(cx, |_, window, cx| {
-                            window.focus(&focus_handle, cx);
-                        });
-                    }
-                }
-                #[cfg(not(all(feature = "windows-native-rdp", target_os = "windows")))]
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(33))
-                    .await;
-            }
-        });
+        let windows_native_maintenance_task =
+            Self::spawn_windows_native_maintenance_task(window_handle.clone(), cx);
 
         cx.on_release(move |this, cx| {
             close_runtime_once(&mut this.input_tx);
+            this.output_rx.take();
+            this.presentation_tx.take();
+            this.presentation_queue.clear();
+            this.presentation_in_flight = false;
+            this.reset_presentation_pacing();
+            this._initial_layout_task.take();
+            this._output_ready_task.take();
+            this._presentation_task.take();
+
             #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
             {
                 this.windows_native_display.reset();
@@ -384,16 +383,22 @@ impl RemoteDesktopView {
                     cx,
                 );
             }
-            let mut images = std::mem::take(&mut this.pending_frame_drops);
-            images.extend(
+
+            this.retired_textures.retire_all(
                 this.rendered_frames
                     .take_all_distinct(this.latest_frame.take()),
             );
-            images.extend(this.cursor.release_all_images());
+            let textures = this.retired_textures.take_all();
+            let cursor_images = this.cursor.release_all_images();
             let _ = window_handle.update(cx, move |_, window, _| {
-                for image in images {
+                for texture in textures {
+                    if let Err(error) = window.drop_dynamic_texture(texture) {
+                        tracing::warn!(?error, "failed to release remote desktop texture");
+                    }
+                }
+                for image in cursor_images {
                     if let Err(error) = window.drop_image(image) {
-                        tracing::warn!(?error, "failed to release remote desktop image");
+                        tracing::warn!(?error, "failed to release remote desktop cursor");
                     }
                 }
             });
@@ -405,11 +410,15 @@ impl RemoteDesktopView {
             title: config.title,
             input_tx: None,
             output_rx: None,
+            presentation_tx: None,
+            presentation_queue: presentation::PresentationQueue::default(),
+            presentation_in_flight: false,
+            presentation_pacer: presentation::PresentationPacer::default(),
+            latest_presentation_frame_ticket: Arc::new(AtomicU64::new(0)),
             focus_handle,
             latest_frame: None,
-            framebuffer: None,
             rendered_frames: RenderedFrameLifecycle::default(),
-            pending_frame_drops: Vec::new(),
+            retired_textures: surface::RetiredTextureQueue::default(),
             cursor: cursor::RemoteCursorState::new(manage_native_cursor),
             frame_sync: frame_sync::FrameSyncTracker::default(),
             capabilities: None,
@@ -440,7 +449,16 @@ impl RemoteDesktopView {
             native_event_state: None,
             #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
             windows_native_display: Default::default(),
-            _output_poll_task: output_poll_task,
+            #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+            _windows_native_maintenance_task: windows_native_maintenance_task,
+            startup_started_at: Instant::now(),
+            runtime_started_at: None,
+            startup_connected_logged: false,
+            startup_frame_logged: false,
+            _initial_layout_task: None,
+            _output_ready_task: None,
+            _presentation_task: None,
+            _presentation_pacing_task: None,
         }
     }
 
@@ -735,7 +753,13 @@ impl RemoteDesktopView {
         }
 
         close_runtime_once(&mut self.input_tx);
-        self.output_rx = None;
+        self.output_rx.take();
+        self.presentation_tx.take();
+        self.presentation_queue.clear();
+        self.presentation_in_flight = false;
+        self.reset_presentation_pacing();
+        self._output_ready_task.take();
+        self._presentation_task.take();
         self.presentation_initialization =
             presentation::RemoteDesktopPresentationInitialization::Canvas {
                 fallback_reason: None,
@@ -1251,6 +1275,21 @@ impl RemoteDesktopView {
             }
         }
     }
+
+    fn cancel_presentation_pacing(&mut self) {
+        self.presentation_pacer.invalidate_timer();
+        self._presentation_pacing_task.take();
+    }
+
+    fn reset_presentation_pacing(&mut self) {
+        self.presentation_pacer.reset();
+        self._presentation_pacing_task.take();
+    }
+}
+
+fn remote_desktop_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os(REMOTE_DESKTOP_DIAGNOSTICS_ENV).is_some())
 }
 
 fn close_runtime_once(

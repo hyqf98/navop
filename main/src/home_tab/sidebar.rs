@@ -18,6 +18,62 @@ impl HomePage {
         let show_ai_workbench =
             AppSettings::current(cx).startup_default_page == StartupDefaultPage::Home;
         let rail_item_size = Size::Size(cx.theme().geometry.layout.global_rail_item);
+        let mut navigation = v_flex()
+            .flex_1()
+            .w_full()
+            .p_2()
+            .gap_2()
+            .when(collapsed, |sidebar| sidebar.items_center());
+
+        for filter in ConnectionType::all() {
+            let selected = self.selected_filter == filter;
+            let icon = if collapsed {
+                connection_type_rail_icon(filter)
+            } else {
+                connection_type_navigation_icon(filter, ConnectionVisualSize::List)
+            };
+            navigation = navigation.child(
+                div()
+                    .id(filter.label())
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .w_full()
+                    .py_2()
+                    .when(collapsed, |row| {
+                        row.justify_center().px_0().py_0().h(cx
+                            .theme()
+                            .geometry
+                            .layout
+                            .global_rail_item)
+                    })
+                    .when(!collapsed, |row| row.px_3())
+                    .cursor_pointer()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .when(selected, |row| {
+                        row.bg(cx.theme().list_active)
+                            .border_l_3()
+                            .border_color(cx.theme().list_active_border)
+                    })
+                    .when(!selected, |row| {
+                        row.hover(|style| style.bg(cx.theme().sidebar_accent))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_selected_filter(filter, cx);
+                    }))
+                    .child(icon)
+                    .when(!collapsed, |row| {
+                        row.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().foreground)
+                                .when(selected, |label| label.font_weight(FontWeight::MEDIUM))
+                                .child(filter.label()),
+                        )
+                    }),
+            );
+        }
 
         v_flex()
             .relative()
@@ -27,63 +83,7 @@ impl HomePage {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .when(collapsed, |sidebar| sidebar.items_center())
-                    .children(ConnectionType::all().into_iter().map(|filter| {
-                        let selected = self.selected_filter == filter;
-                        let icon = if collapsed {
-                            connection_type_rail_icon(filter)
-                        } else {
-                            connection_type_navigation_icon(filter, ConnectionVisualSize::List)
-                        };
-                        div()
-                            .id(filter.label())
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .w_full()
-                            .py_2()
-                            .when(collapsed, |row| {
-                                row.justify_center().px_0().py_0().h(cx
-                                    .theme()
-                                    .geometry
-                                    .layout
-                                    .global_rail_item)
-                            })
-                            .when(!collapsed, |row| row.px_3())
-                            .cursor_pointer()
-                            .rounded_lg()
-                            .overflow_hidden()
-                            .when(selected, |row| {
-                                row.bg(cx.theme().list_active)
-                                    .border_l_3()
-                                    .border_color(cx.theme().list_active_border)
-                            })
-                            .when(!selected, |row| {
-                                row.hover(|style| style.bg(cx.theme().sidebar_accent))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_selected_filter(filter, cx);
-                            }))
-                            .child(icon)
-                            .when(!collapsed, |row| {
-                                row.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().foreground)
-                                        .when(selected, |label| {
-                                            label.font_weight(FontWeight::MEDIUM)
-                                        })
-                                        .child(filter.label()),
-                                )
-                            })
-                    })),
-            )
+            .child(navigation)
             .child(
                 v_flex()
                     .w_full()
@@ -95,7 +95,7 @@ impl HomePage {
                     .when(show_ai_workbench, |footer| {
                         footer.child(self.render_legacy_sidebar_button(
                             "legacy-open-ai-workbench",
-                            IconName::AILine,
+                            IconName::AI,
                             t!("Settings.General.Startup.default_page_ai_workbench").to_string(),
                             collapsed,
                             |home, window, cx| home.add_ai_workbench_tab(window, cx),
@@ -150,7 +150,7 @@ impl HomePage {
                                 footer.items_center().child(
                                     IconButton::new(
                                         "legacy-home-user",
-                                        ObjectIcon::new(IconName::User),
+                                        FunctionalIcon::new(IconName::User),
                                     )
                                     .hit_size(rail_item_size)
                                     .glyph_size(IconSize::Medium)

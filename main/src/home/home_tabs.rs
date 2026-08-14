@@ -1,9 +1,9 @@
 use crate::home_tab::HomePage;
 use crate::license::is_feature_enabled;
-use crate::onetcli_app::GlobalTabContainer;
+use crate::onetcli_app::{GlobalOnetCliApp, GlobalTabContainer};
 use crate::setting_tab::{AppSettings, DatabaseOpenMode, SettingsPanel};
 use db_view::database_tab::DatabaseTabView;
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, Focusable, Window};
 use gpui_component::{WindowExt, notification::Notification};
 use mongodb_view::MongoTabView;
 use notes::NotesView;
@@ -122,6 +122,93 @@ mod tests {
     }
 
     #[test]
+    fn persistent_sidebar_home_entry_is_the_first_primary_navigation_item() {
+        let source = include_str!("../persistent_connection_sidebar/rail.rs");
+        let home = source.find("\"persistent-open-home\"").unwrap();
+        let filters = source.find("render_filter_buttons(").unwrap();
+
+        assert!(home < filters);
+        assert!(source.contains("IconName::Home"));
+        assert!(source.contains("HomePage::show_home(home, window, cx)"));
+    }
+
+    #[test]
+    fn persistent_sidebar_home_entry_avoids_reentrant_home_page_updates() {
+        let tabs_source = include_str!("home_tabs.rs").replace("\r\n", "\n");
+        let tabs_impl = tabs_source.split_once("\nimpl HomePage {\n").unwrap().1;
+        let rail_source =
+            include_str!("../persistent_connection_sidebar/rail.rs").replace("\r\n", "\n");
+        let show_home_start = tabs_impl
+            .find(
+                "pub(crate) fn show_home(home_page: &Entity<Self>, window: &mut Window, cx: &mut App)",
+            )
+            .unwrap();
+        let show_home_end = tabs_impl[show_home_start..]
+            .find("\n    fn terminal_sync_path_enabled")
+            .map(|offset| show_home_start + offset)
+            .unwrap();
+        let show_home_source = &tabs_impl[show_home_start..show_home_end];
+
+        assert!(show_home_source.contains("window.defer(cx, move |window, cx|"));
+        assert!(show_home_source.contains("try_global::<GlobalOnetCliApp>()"));
+        assert!(show_home_source.contains("app.show_home(window, cx)"));
+        assert!(!show_home_source.contains("activate_base_content"));
+        assert!(rail_source.contains("|home, window, cx| HomePage::show_home(home, window, cx)"));
+    }
+
+    #[test]
+    fn home_page_connection_openers_defer_active_tab_changes() {
+        let tabs_source = include_str!("home_tabs.rs").replace("\r\n", "\n");
+        let tabs_impl = tabs_source.split_once("\nimpl HomePage {\n").unwrap().1;
+        let forwarding_source = include_str!("../home_tab/forwarding.rs").replace("\r\n", "\n");
+        let forwarding_impl = forwarding_source
+            .split_once("\nimpl HomePage {\n")
+            .unwrap()
+            .1;
+
+        for (method, next_method) in [
+            (
+                "pub(crate) fn open_ssh_terminal_with_mode",
+                "pub(crate) fn open_serial_terminal",
+            ),
+            (
+                "pub(crate) fn open_serial_terminal_with_mode",
+                "pub(crate) fn open_sftp_view",
+            ),
+            (
+                "pub(crate) fn open_sftp_view",
+                "pub(crate) fn open_remote_desktop_with_mode",
+            ),
+            (
+                "pub(crate) fn open_remote_desktop_with_mode",
+                "pub(crate) fn open_redis_tab_with_mode",
+            ),
+        ] {
+            let start = tabs_impl.find(method).unwrap();
+            let end = tabs_impl[start..]
+                .find(next_method)
+                .map(|offset| start + offset)
+                .unwrap();
+            let method_source = &tabs_impl[start..end];
+
+            assert!(
+                method_source.contains("window.defer(cx, move |window, cx|"),
+                "{method} must defer TabContainer activation to avoid re-entering HomePage"
+            );
+        }
+
+        let start = forwarding_impl
+            .find("pub(crate) fn open_port_forwarding_tab")
+            .unwrap();
+        let end = forwarding_impl[start..]
+            .find("pub(super) fn port_forwarding_tab_config")
+            .map(|offset| start + offset)
+            .unwrap();
+        let method_source = &forwarding_impl[start..end];
+        assert!(method_source.contains("window.defer(cx, move |window, cx|"));
+    }
+
+    #[test]
     fn persistent_sidebar_uses_shared_rail_geometry_and_icon_scale() {
         let source = include_str!("../persistent_connection_sidebar/rail.rs").replace("\r\n", "\n");
         let geometry = include_str!("../../../crates/ui/src/theme/geometry.rs");
@@ -151,11 +238,14 @@ mod tests {
 
         assert!(source.contains("IconName::User"));
         assert!(source.contains("connection_type_rail_icon"));
-        assert!(visuals.contains("ConnectionType::All => ConnectionVisual"));
-        assert!(visuals.contains("navigation_icon: IconName::ServerLine"));
-        assert!(visuals.contains("navigation_icon: IconName::RdpLine"));
-        assert!(visuals.contains("identity_icon: ColorObject(IconName::Rdp)"));
-        assert!(visuals.contains("identity_icon: ColorObject(IconName::Vnc)"));
+        assert!(visuals.contains("ConnectionType::All => IconName::ServerLine"));
+        assert!(visuals.contains("ConnectionType::SshSftp => IconName::TerminalLine"));
+        assert!(visuals.contains("ConnectionType::Rdp => IconName::RdpLine"));
+        assert!(visuals.contains("ConnectionType::Vnc => IconName::VncLine"));
+        assert!(visuals.contains(".mono()"));
+        assert!(visuals.contains("ConnectionType::Rdp => IconName::Rdp"));
+        assert!(visuals.contains("ConnectionType::Vnc => IconName::Vnc"));
+        assert!(visuals.contains(".color()"));
         assert!(icons.contains("icons/user.svg"));
         assert!(icons.contains("icons/server_line.svg"));
         assert!(icons.contains("icons/rdp_line.svg"));
@@ -319,6 +409,35 @@ impl HomePage {
             .unwrap_or_else(|| self.tab_container.clone())
     }
 
+    pub(crate) fn is_home_active(&self) -> bool {
+        self.home_active
+    }
+
+    pub(crate) fn set_home_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.home_active == active {
+            return;
+        }
+        self.home_active = active;
+        cx.notify();
+    }
+
+    pub(crate) fn show_home(home_page: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let app = cx
+            .try_global::<GlobalOnetCliApp>()
+            .map(|global| global.app.clone());
+        let home_page = home_page.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(app) = app {
+                app.update(cx, |app, cx| app.show_home(window, cx));
+            } else {
+                home_page.update(cx, |home, cx| {
+                    home.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                });
+            }
+        });
+    }
+
     fn terminal_sync_path_enabled(cx: &App) -> bool {
         current_terminal_settings(cx).sync_path_with_terminal
     }
@@ -366,9 +485,11 @@ impl HomePage {
         let terminal_view = cx.new(|cx| {
             TerminalWorkspace::new_ssh_with_index(conn, tab_index, window, cx, None, sync_path)
         });
-        tab_container.update(cx, |tc, cx| {
-            let tab = TabItem::new(tab_id, "ssh", terminal_view);
-            tc.add_tab_with_mode(tab, mode, window, cx);
+        window.defer(cx, move |window, cx| {
+            tab_container.update(cx, |tc, cx| {
+                let tab = TabItem::new(tab_id, "ssh", terminal_view);
+                tc.add_tab_with_mode(tab, mode, window, cx);
+            });
         });
     }
 
@@ -411,9 +532,11 @@ impl HomePage {
 
         let terminal_view =
             cx.new(|cx| TerminalWorkspace::new_serial_with_index(conn, tab_index, window, cx));
-        tab_container.update(cx, |tc, cx| {
-            let tab = TabItem::new(tab_id, "serial", terminal_view);
-            tc.add_tab_with_mode(tab, mode, window, cx);
+        window.defer(cx, move |window, cx| {
+            tab_container.update(cx, |tc, cx| {
+                let tab = TabItem::new(tab_id, "serial", terminal_view);
+                tc.add_tab_with_mode(tab, mode, window, cx);
+            });
         });
     }
 
@@ -542,8 +665,10 @@ impl HomePage {
 
         // 添加标签页
         let tab = TabItem::new(tab_id, "sftp", sftp_view);
-        tab_container.update(cx, |tc, cx| {
-            tc.add_and_activate_tab_with_focus(tab, window, cx);
+        window.defer(cx, move |window, cx| {
+            tab_container.update(cx, |tc, cx| {
+                tc.add_and_activate_tab_with_focus(tab, window, cx);
+            });
         });
     }
 
@@ -596,9 +721,11 @@ impl HomePage {
                 cx,
             )
         });
-        tab_container.update(cx, |tc, cx| {
-            let tab = TabItem::new(tab_id, tab_kind, view);
-            tc.add_tab_with_mode(tab, mode, window, cx);
+        window.defer(cx, move |window, cx| {
+            tab_container.update(cx, |tc, cx| {
+                let tab = TabItem::new(tab_id, tab_kind, view);
+                tc.add_tab_with_mode(tab, mode, window, cx);
+            });
         });
     }
 

@@ -1,15 +1,18 @@
-use crate::sql_editor::SqlEditor;
+use crate::sql_editor::{SqlEditor, SqlSchema};
 use crate::sql_result_tab::{SessionSqlRun, SqlResultTabContainer};
 use db::{DbManager, GlobalDbState, StreamingSqlParser, format_sql};
+use futures::channel::oneshot;
 use gpui::prelude::*;
 use gpui::{
-    App, AppContext, AsyncApp, Axis, Bounds, ClickEvent, Context, Element, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseMoveEvent, MouseUpEvent, NoAction,
-    ParentElement, Pixels, Point, Render, SharedString, Styled, Task, WeakEntity, Window, div, px,
+    AnyWindowHandle, App, AppContext, AsyncApp, Axis, Bounds, ClickEvent, Context, Element, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, MouseMoveEvent, MouseUpEvent,
+    NoAction, ParentElement, Pixels, Point, Render, SharedString, Styled, Task, WeakEntity, Window,
+    div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{InputContextMenuItem, InputEvent};
-use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_component::input::{Input, InputContextMenuItem, InputEvent, InputState};
+use gpui_component::notification::Notification;
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, Size, WindowExt, h_flex, v_flex,
 };
@@ -18,8 +21,11 @@ use one_core::storage::{DatabaseType, QueryDirectoryScope, default_query_directo
 use one_core::tab_container::{TabContainer, TabContent, TabContentEvent};
 use one_core::utils::auto_save_config::AutoSaveConfig;
 use one_ui::resize_handle::{ResizePanel, resize_handle};
+use parking_lot::{Mutex, RwLock};
 use rust_i18n::t;
 use smol::Timer;
+use std::fs::OpenOptions;
+use std::io;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +40,93 @@ const SQL_EDITOR_INPUT_CONTEXT: &str = "SqlEditor > Input";
 const RUN_CURRENT_QUERY_KEY_BINDINGS: [&str; 2] = ["cmd-enter", "ctrl-enter"];
 const RUN_ALL_QUERY_KEY_BINDINGS: [&str; 2] = ["cmd-shift-enter", "ctrl-shift-enter"];
 const TOGGLE_LINE_COMMENT_KEY_BINDINGS: [&str; 2] = ["cmd-/", "ctrl-/"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum QueryFileNameError {
+    Empty,
+    Invalid,
+    AlreadyExists,
+    ReadDirectory(String),
+}
+
+fn query_file_path_for_name(directory: &Path, name: &str) -> Result<PathBuf, QueryFileNameError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(QueryFileNameError::Empty);
+    }
+    if is_invalid_query_file_name(name) {
+        return Err(QueryFileNameError::Invalid);
+    }
+
+    let file_name = if Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+    {
+        name.to_owned()
+    } else {
+        format!("{name}.sql")
+    };
+    if file_name.eq_ignore_ascii_case(".sql") {
+        return Err(QueryFileNameError::Invalid);
+    }
+
+    match std::fs::read_dir(directory) {
+        Ok(entries) => {
+            if entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&file_name)
+            }) {
+                return Err(QueryFileNameError::AlreadyExists);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(QueryFileNameError::ReadDirectory(error.to_string())),
+    }
+
+    Ok(directory.join(file_name))
+}
+
+fn is_invalid_query_file_name(name: &str) -> bool {
+    const INVALID_CHARACTERS: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    const RESERVED_NAMES: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    if matches!(name, "." | "..")
+        || name.chars().any(char::is_control)
+        || name
+            .chars()
+            .any(|character| INVALID_CHARACTERS.contains(&character))
+    {
+        return true;
+    }
+    let base_name = name.split('.').next().unwrap_or(name);
+    RESERVED_NAMES
+        .iter()
+        .any(|reserved| base_name.eq_ignore_ascii_case(reserved))
+}
+
+fn write_sql_file(file_path: &Path, sql: &str) -> io::Result<()> {
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file_path, sql)
+}
+
+fn write_new_sql_file(file_path: &Path, sql: &str) -> io::Result<()> {
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, sql.as_bytes()))
+}
 
 gpui::actions!(
     sql_editor_view,
@@ -518,6 +611,109 @@ fn transaction_control_failed(result: &anyhow::Result<Vec<db::SqlResult>>) -> bo
     }
 }
 
+fn query_connection_context_label(connection_name: &str, server_info: &str) -> String {
+    let connection_name = connection_name.trim();
+    let server_info = server_info.trim();
+
+    match (connection_name.is_empty(), server_info.is_empty()) {
+        (false, false) => format!("{connection_name} · {server_info}"),
+        (false, true) => connection_name.to_string(),
+        (true, false) => server_info.to_string(),
+        (true, true) => String::new(),
+    }
+}
+
+fn query_connection_ids(available_connection_ids: &[String], connection_id: &str) -> Vec<String> {
+    let mut connection_ids = Vec::new();
+    for available_connection_id in available_connection_ids {
+        let available_connection_id = available_connection_id.trim();
+        if !available_connection_id.is_empty()
+            && !connection_ids
+                .iter()
+                .any(|connection_id| connection_id == available_connection_id)
+        {
+            connection_ids.push(available_connection_id.to_string());
+        }
+    }
+
+    let connection_id = connection_id.trim();
+    if !connection_id.is_empty()
+        && !connection_ids
+            .iter()
+            .any(|available_connection_id| available_connection_id == connection_id)
+    {
+        connection_ids.push(connection_id.to_string());
+    }
+    connection_ids
+}
+
+fn can_switch_query_connection(is_executing: bool, has_manual_transaction: bool) -> bool {
+    !is_executing && !has_manual_transaction
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryToolbarAction {
+    Run,
+    RunSelected,
+    Stop,
+}
+
+fn query_toolbar_action(is_executing: bool, has_selection: bool) -> QueryToolbarAction {
+    if is_executing {
+        QueryToolbarAction::Stop
+    } else if has_selection {
+        QueryToolbarAction::RunSelected
+    } else {
+        QueryToolbarAction::Run
+    }
+}
+
+fn is_current_query_context_generation(expected: u64, current: u64) -> bool {
+    expected == current
+}
+
+#[derive(Clone, Debug)]
+struct QueryConnectionOption {
+    id: String,
+    label: SharedString,
+}
+
+impl SelectItem for QueryConnectionOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
+fn query_connection_options(
+    available_connection_ids: &[String],
+    connection_id: &str,
+    global_state: &GlobalDbState,
+) -> Vec<QueryConnectionOption> {
+    query_connection_ids(available_connection_ids, connection_id)
+        .into_iter()
+        .map(|connection_id| {
+            let label = global_state
+                .get_config(&connection_id)
+                .map(|connection| {
+                    query_connection_context_label(&connection.name, &connection.server_info())
+                })
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| connection_id.clone())
+                .into();
+            QueryConnectionOption {
+                id: connection_id,
+                label,
+            }
+        })
+        .collect()
+}
+
 // Events emitted by SqlEditorTabContent
 #[derive(Debug, Clone)]
 pub enum SqlEditorEvent {
@@ -531,6 +727,7 @@ pub enum SqlEditorEvent {
 pub struct SqlEditorTabConfig {
     pub title: SharedString,
     pub connection_id: String,
+    pub available_connection_ids: Vec<String>,
     pub database_type: DatabaseType,
     pub file_path: Option<PathBuf>,
     pub new_file_directory: Option<PathBuf>,
@@ -544,13 +741,15 @@ pub struct SqlEditorTab {
     connection_id: String,
     database_type: DatabaseType,
     sql_result_tab_container: Entity<SqlResultTabContainer>,
+    connection_select: Entity<SelectState<SearchableVec<QueryConnectionOption>>>,
     database_select: Entity<SelectState<SearchableVec<String>>>,
     schema_select: Entity<SelectState<SearchableVec<String>>>,
     transaction_mode_select: Entity<SelectState<SearchableVec<TransactionModeOption>>>,
     supports_schema: bool,
     uses_schema_as_database: bool,
     focus_handle: FocusHandle,
-    file_path: PathBuf,
+    file_path: Arc<RwLock<PathBuf>>,
+    requires_name: Arc<AtomicBool>,
     _save_task: Option<Task<()>>,
     result_panel_size: Pixels,
     resizing: bool,
@@ -561,6 +760,8 @@ pub struct SqlEditorTab {
     auto_save_seq: Arc<AtomicU64>,
     /// 是否有未保存的修改
     is_dirty: Arc<AtomicBool>,
+    /// 查询上下文代次，用于丢弃连接、数据库或 Schema 切换前发起的异步回写。
+    context_generation: Arc<AtomicU64>,
 }
 
 impl SqlEditorTab {
@@ -571,6 +772,26 @@ impl SqlEditorTab {
     ) -> Self {
         let editor = cx.new(|cx| SqlEditor::new(window, cx));
         let focus_handle = cx.focus_handle();
+        let global_state = cx.global::<GlobalDbState>().clone();
+        let connection_id = config.connection_id;
+        let connection_options = query_connection_options(
+            &config.available_connection_ids,
+            &connection_id,
+            &global_state,
+        );
+        let selected_connection_index = connection_options
+            .iter()
+            .position(|option| option.id == connection_id)
+            .map(IndexPath::new);
+        let connection_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(connection_options),
+                selected_connection_index,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
         let database_select =
             cx.new(|cx| SelectState::new(SearchableVec::new(vec![]), None, window, cx));
         let schema_select =
@@ -584,11 +805,9 @@ impl SqlEditorTab {
             )
         });
 
-        let global_state = cx.global::<GlobalDbState>().clone();
         let capabilities = global_state.capabilities(&config.database_type);
         let supports_schema = capabilities.supports_schema;
         let uses_schema_as_database = capabilities.uses_schema_as_database;
-        let connection_id = config.connection_id;
         let initial_database = config.initial_database;
         let initial_schema = config.initial_schema;
         let initial_select_value = initial_database_select_value(
@@ -598,6 +817,7 @@ impl SqlEditorTab {
         );
 
         let should_load_file = config.file_path.is_some();
+        let requires_name = Arc::new(AtomicBool::new(!should_load_file));
         let resolved_file_path = match config.file_path {
             Some(path) => path,
             None => match config.new_file_directory {
@@ -612,6 +832,7 @@ impl SqlEditorTab {
 
         let auto_save_seq = Arc::new(AtomicU64::new(0));
         let is_dirty = Arc::new(AtomicBool::new(false));
+        let context_generation = Arc::new(AtomicU64::new(0));
 
         let instance = Self {
             title: config.title,
@@ -619,13 +840,15 @@ impl SqlEditorTab {
             connection_id,
             database_type: config.database_type,
             sql_result_tab_container: cx.new(|cx| SqlResultTabContainer::new(window, cx)),
+            connection_select: connection_select.clone(),
             database_select: database_select.clone(),
             schema_select: schema_select.clone(),
             transaction_mode_select: transaction_mode_select.clone(),
             supports_schema,
             uses_schema_as_database,
             focus_handle,
-            file_path: resolved_file_path.clone(),
+            file_path: Arc::new(RwLock::new(resolved_file_path.clone())),
+            requires_name: requires_name.clone(),
             _save_task: None,
             result_panel_size: RESULT_PANEL_DEFAULT_SIZE,
             resizing: false,
@@ -634,17 +857,19 @@ impl SqlEditorTab {
             manual_transaction: None,
             auto_save_seq: auto_save_seq.clone(),
             is_dirty: is_dirty.clone(),
+            context_generation,
         };
 
         instance.configure_editor_context_menu(cx);
-        instance.bind_select_event(cx);
+        instance.bind_select_event(window, cx);
         instance.bind_transaction_mode_select_event(window, cx);
-        instance.bind_auto_save(auto_save_seq, is_dirty, window, cx);
+        instance.bind_auto_save(auto_save_seq, is_dirty, requires_name, window, cx);
         instance.load_databases_async(
             initial_select_value,
             initial_schema,
             resolved_file_path,
             should_load_file,
+            0,
             cx,
             window,
         );
@@ -715,51 +940,186 @@ impl SqlEditorTab {
         dir_path.join(file_name)
     }
 
-    pub fn get_file_path(&self) -> &PathBuf {
-        &self.file_path
+    pub fn get_file_path(&self) -> PathBuf {
+        self.file_path.read().clone()
     }
 
-    fn bind_select_event(&self, cx: &mut Context<Self>) {
-        let this = self.clone();
-        cx.subscribe(&self.database_select, move |_this, _select, event, cx| {
-            let global_state = cx.global::<GlobalDbState>().clone();
-            if let SelectEvent::Confirm(Some(db_name)) = event {
-                let db = db_name.clone();
-                let instance = this.clone();
-                cx.spawn(async move |_handle, cx| {
-                    // Load schemas if supported
-                    if instance.supports_schema && !instance.uses_schema_as_database {
-                        instance
-                            .load_schemas_for_db(global_state.clone(), &db, None, cx)
-                            .await;
-                    }
-                    instance.update_schema_for_db(global_state, &db, cx).await;
-                })
-                .detach();
-            }
-        })
+    fn bind_select_event(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.subscribe_in(
+            &self.connection_select,
+            window,
+            |this,
+             _select,
+             event: &SelectEvent<SearchableVec<QueryConnectionOption>>,
+             window,
+             cx| {
+                if let SelectEvent::Confirm(Some(connection_id)) = event {
+                    this.switch_connection(connection_id, window, cx);
+                }
+            },
+        )
         .detach();
 
-        // Bind schema select event
-        let this_for_schema = self.clone();
-        cx.subscribe(&self.schema_select, move |_this, _select, event, cx| {
-            let global_state = cx.global::<GlobalDbState>().clone();
-            if let SelectEvent::Confirm(Some(schema_name)) = event {
-                let instance = this_for_schema.clone();
-                let database_or_schema = if instance.uses_schema_as_database {
-                    Some(schema_name.clone())
-                } else {
-                    instance.database_select.read(cx).selected_value().cloned()
-                };
-                if let Some(db) = database_or_schema {
+        cx.subscribe_in(
+            &self.database_select,
+            window,
+            |this, _select, event: &SelectEvent<SearchableVec<String>>, window, cx| {
+                let global_state = cx.global::<GlobalDbState>().clone();
+                if let SelectEvent::Confirm(Some(db_name)) = event {
+                    let generation = this.next_context_generation();
+                    let window_handle = window.window_handle();
+                    if this.supports_schema && !this.uses_schema_as_database {
+                        Self::clear_string_select(&this.schema_select, window, cx);
+                    }
+                    let db = db_name.clone();
+                    let instance = this.clone();
                     cx.spawn(async move |_handle, cx| {
-                        instance.update_schema_for_db(global_state, &db, cx).await;
+                        if instance.supports_schema && !instance.uses_schema_as_database {
+                            instance
+                                .load_schemas_for_db(
+                                    global_state.clone(),
+                                    &db,
+                                    None,
+                                    generation,
+                                    window_handle,
+                                    cx,
+                                )
+                                .await;
+                        }
+                        instance
+                            .update_schema_for_db(global_state, &db, generation, cx)
+                            .await;
                     })
                     .detach();
                 }
-            }
-        })
+            },
+        )
         .detach();
+
+        cx.subscribe_in(
+            &self.schema_select,
+            window,
+            |this, _select, event: &SelectEvent<SearchableVec<String>>, _window, cx| {
+                let global_state = cx.global::<GlobalDbState>().clone();
+                if let SelectEvent::Confirm(Some(schema_name)) = event {
+                    let generation = this.next_context_generation();
+                    let database_or_schema = if this.uses_schema_as_database {
+                        Some(schema_name.clone())
+                    } else {
+                        this.database_select.read(cx).selected_value().cloned()
+                    };
+                    if let Some(db) = database_or_schema {
+                        let instance = this.clone();
+                        cx.spawn(async move |_handle, cx| {
+                            instance
+                                .update_schema_for_db(global_state, &db, generation, cx)
+                                .await;
+                        })
+                        .detach();
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn clear_string_select(
+        select: &Entity<SelectState<SearchableVec<String>>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        select.update(cx, |state, cx| {
+            state.set_items(SearchableVec::new(Vec::new()), window, cx);
+            state.set_selected_index(None, window, cx);
+        });
+    }
+
+    fn next_context_generation(&self) -> u64 {
+        self.context_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn is_context_generation_current(&self, generation: u64) -> bool {
+        is_current_query_context_generation(
+            generation,
+            self.context_generation.load(Ordering::SeqCst),
+        )
+    }
+
+    fn restore_connection_selection(&self, window: &mut Window, cx: &mut App) {
+        self.connection_select.update(cx, |state, cx| {
+            state.set_selected_value(&self.connection_id, window, cx);
+        });
+    }
+
+    fn switch_connection(
+        &mut self,
+        connection_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if connection_id == self.connection_id {
+            return;
+        }
+
+        let is_executing = self.sql_result_tab_container.read(cx).is_executing(cx);
+        if !can_switch_query_connection(is_executing, self.manual_transaction.is_some()) {
+            self.restore_connection_selection(window, cx);
+            let message = if self.manual_transaction.is_some() {
+                t!("Query.transaction_finish_before_switch_connection").to_string()
+            } else {
+                t!("Query.connection_switch_during_execution").to_string()
+            };
+            window.push_notification(message, cx);
+            return;
+        }
+
+        let global_state = cx.global::<GlobalDbState>().clone();
+        let Some(connection) = global_state.get_config(connection_id) else {
+            self.restore_connection_selection(window, cx);
+            window.push_notification(t!("Query.connection_unavailable").to_string(), cx);
+            return;
+        };
+
+        let generation = self.next_context_generation();
+        let capabilities = global_state.capabilities(&connection.database_type);
+        self.connection_id = connection_id.to_string();
+        self.database_type = connection.database_type.clone();
+        self.supports_schema = capabilities.supports_schema;
+        self.uses_schema_as_database = capabilities.uses_schema_as_database;
+        cx.emit(TabContentEvent::SourceChanged {
+            from: self.connection_id.clone().into(),
+        });
+
+        Self::clear_string_select(&self.database_select, window, cx);
+        Self::clear_string_select(&self.schema_select, window, cx);
+
+        if !supports_manual_transactions(&self.database_type) {
+            self.transaction_mode = SqlTransactionMode::Auto;
+            self.transaction_mode_select.update(cx, |state, cx| {
+                state.set_selected_value(&SqlTransactionMode::Auto, window, cx);
+            });
+        }
+
+        let completion_info = DbManager::default()
+            .get_plugin(&self.database_type)
+            .map(|plugin| plugin.get_completion_info())
+            .unwrap_or_default();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_db_completion_info(completion_info, SqlSchema::default(), cx);
+        });
+        self.sql_result_tab_container
+            .update(cx, |container, cx| container.hide(cx));
+
+        self.load_databases_async(
+            None,
+            None,
+            self.get_file_path(),
+            false,
+            generation,
+            cx,
+            window,
+        );
+        cx.notify();
     }
 
     fn bind_transaction_mode_select_event(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -793,6 +1153,7 @@ impl SqlEditorTab {
         &self,
         auto_save_seq: Arc<AtomicU64>,
         is_dirty: Arc<AtomicBool>,
+        requires_name: Arc<AtomicBool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -824,6 +1185,7 @@ impl SqlEditorTab {
                     let seq_clone = auto_save_seq.clone();
                     let dirty_clone = is_dirty.clone();
                     let file_path_clone = file_path.clone();
+                    let requires_name_clone = requires_name.clone();
                     let editor_clone = editor_entity.clone();
 
                     // 启动防抖定时保存
@@ -841,6 +1203,10 @@ impl SqlEditorTab {
                             return;
                         }
 
+                        if requires_name_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
+
                         // 执行保存
                         let _ = cx.update(|cx| {
                             let sql = editor_clone.read(cx).get_text(cx);
@@ -848,28 +1214,15 @@ impl SqlEditorTab {
                                 return;
                             }
 
-                            // 创建目录
-                            if let Some(parent) = file_path_clone.parent() {
-                                if let Err(e) = std::fs::create_dir_all(parent) {
-                                    error!(
-                                        "{}",
-                                        t!(
-                                            "SqlEditorView.create_dir_failed",
-                                            path = format!("{:?}", parent),
-                                            error = e
-                                        )
-                                    );
-                                    return;
-                                }
-                            }
+                            let file_path = file_path_clone.read().clone();
 
                             // 写入文件
-                            if let Err(e) = std::fs::write(&file_path_clone, &sql) {
+                            if let Err(e) = write_sql_file(&file_path, &sql) {
                                 error!(
                                     "{}",
                                     t!(
                                         "SqlEditorView.auto_save_failed",
-                                        path = format!("{:?}", file_path_clone),
+                                        path = format!("{:?}", file_path),
                                         error = e
                                     )
                                 );
@@ -892,10 +1245,17 @@ impl SqlEditorTab {
         global_state: GlobalDbState,
         database: &str,
         initial_schema: Option<String>,
+        generation: u64,
+        window_handle: AnyWindowHandle,
         cx: &mut AsyncApp,
     ) {
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
+
         let connection_id = self.connection_id.clone();
         let schema_select = self.schema_select.clone();
+        let context_generation = self.context_generation.clone();
         let db = database.to_string();
 
         let schemas = match global_state
@@ -908,38 +1268,39 @@ impl SqlEditorTab {
                 return;
             }
         };
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
 
-        let _ = cx.update(|cx| {
-            if let Some(window_id) = cx.active_window() {
-                let _ = cx.update_window(window_id, |_entity, window, cx| {
-                    schema_select.update(cx, |state, cx| {
-                        if schemas.is_empty() {
-                            let items = SearchableVec::new(vec![
-                                t!("Common.no_available", item = &t!("Schema.schema")).to_string(),
-                            ]);
-                            state.set_items(items, window, cx);
-                            state.set_selected_index(None, window, cx);
-                        } else {
-                            let items = SearchableVec::new(schemas.clone());
-                            state.set_items(items, window, cx);
-
-                            if let Some(schema_name) = initial_schema.as_ref() {
-                                if let Some(index) = schemas.iter().position(|s| s == schema_name) {
-                                    state.set_selected_index(
-                                        Some(IndexPath::new(index)),
-                                        window,
-                                        cx,
-                                    );
-                                } else if !schemas.is_empty() {
-                                    state.set_selected_index(Some(IndexPath::new(0)), window, cx);
-                                }
-                            } else if !schemas.is_empty() {
-                                state.set_selected_index(Some(IndexPath::new(0)), window, cx);
-                            }
-                        }
-                    });
-                });
+        let _ = cx.update_window(window_handle, |_entity, window, cx| {
+            if !is_current_query_context_generation(
+                generation,
+                context_generation.load(Ordering::SeqCst),
+            ) {
+                return;
             }
+            schema_select.update(cx, |state, cx| {
+                if schemas.is_empty() {
+                    let items = SearchableVec::new(vec![
+                        t!("Common.no_available", item = &t!("Schema.schema")).to_string(),
+                    ]);
+                    state.set_items(items, window, cx);
+                    state.set_selected_index(None, window, cx);
+                } else {
+                    let items = SearchableVec::new(schemas.clone());
+                    state.set_items(items, window, cx);
+
+                    if let Some(schema_name) = initial_schema.as_ref() {
+                        if let Some(index) = schemas.iter().position(|s| s == schema_name) {
+                            state.set_selected_index(Some(IndexPath::new(index)), window, cx);
+                        } else {
+                            state.set_selected_index(Some(IndexPath::new(0)), window, cx);
+                        }
+                    } else {
+                        state.set_selected_index(Some(IndexPath::new(0)), window, cx);
+                    }
+                }
+            });
         });
     }
 
@@ -954,10 +1315,11 @@ impl SqlEditorTab {
         init_schema: Option<String>,
         file_path: PathBuf,
         should_load_file: bool,
+        generation: u64,
         cx: &mut Context<Self>,
         window: &mut Window,
     ) {
-        let _ = window;
+        let window_handle = window.window_handle();
         let global_state = cx.global::<GlobalDbState>().clone();
         let connection_id = self.connection_id.clone();
         let database_select = self.database_select.clone();
@@ -965,9 +1327,14 @@ impl SqlEditorTab {
         let editor = self.editor.clone();
         let initial_database = init_db.clone();
         let instance = self.clone();
+        let context_generation = self.context_generation.clone();
         let uses_schema_as_database = self.uses_schema_as_database;
 
         cx.spawn(async move |_handle, cx: &mut AsyncApp| {
+            if !instance.is_context_generation_current(generation) {
+                return;
+            }
+
             let select_items = if uses_schema_as_database {
                 match global_state
                     .list_schemas(cx, connection_id.clone(), String::new())
@@ -976,7 +1343,9 @@ impl SqlEditorTab {
                     Ok(result) => result,
                     Err(e) => {
                         error!("Failed to load schemas for {}: {}", connection_id, e);
-                        Self::notify_async(cx, format!("Failed to load schemas: {}", e));
+                        if instance.is_context_generation_current(generation) {
+                            Self::notify_async(cx, format!("Failed to load schemas: {}", e));
+                        }
                         return;
                     }
                 }
@@ -985,11 +1354,16 @@ impl SqlEditorTab {
                     Ok(result) => result,
                     Err(e) => {
                         error!("Failed to load databases for {}: {}", connection_id, e);
-                        Self::notify_async(cx, format!("Failed to load databases: {}", e));
+                        if instance.is_context_generation_current(generation) {
+                            Self::notify_async(cx, format!("Failed to load databases: {}", e));
+                        }
                         return;
                     }
                 }
             };
+            if !instance.is_context_generation_current(generation) {
+                return;
+            }
 
             let sql_content = if should_load_file && file_path.exists() {
                 match std::fs::read_to_string(&file_path) {
@@ -1002,54 +1376,70 @@ impl SqlEditorTab {
             } else {
                 None
             };
+            if !instance.is_context_generation_current(generation) {
+                return;
+            }
 
             let selected_name = initial_database
                 .clone()
                 .or_else(|| select_items.first().cloned());
             let resolved_database = selected_name.clone();
 
-            cx.update(|cx: &mut App| {
-                if let Some(window_id) = cx.active_window() {
-                    cx.update_window(window_id, |_entity, window, cx| {
-                        let target_select = if uses_schema_as_database {
-                            schema_select.clone()
-                        } else {
-                            database_select.clone()
-                        };
-                        let empty_label = if uses_schema_as_database {
-                            t!("Schema.schema").to_string()
-                        } else {
-                            t!("Database.database").to_string()
-                        };
-                        target_select.update(cx, |state, cx| {
-                            set_select_items_with_initial_value(
-                                state,
-                                select_items.clone(),
-                                selected_name.as_deref(),
-                                empty_label,
-                                window,
-                                cx,
-                            );
-                        });
-                        if let Some(sql) = sql_content {
-                            editor.update(cx, |e, cx| {
-                                e.set_value(sql.clone(), window, cx);
-                            });
-                        }
-                    })
-                } else {
-                    Err(anyhow::anyhow!("No active window"))
+            let _ = cx.update_window(window_handle, |_entity, window, cx| {
+                if !is_current_query_context_generation(
+                    generation,
+                    context_generation.load(Ordering::SeqCst),
+                ) {
+                    return;
                 }
-            })
-            .ok();
+                let target_select = if uses_schema_as_database {
+                    schema_select.clone()
+                } else {
+                    database_select.clone()
+                };
+                let empty_label = if uses_schema_as_database {
+                    t!("Schema.schema").to_string()
+                } else {
+                    t!("Database.database").to_string()
+                };
+                target_select.update(cx, |state, cx| {
+                    set_select_items_with_initial_value(
+                        state,
+                        select_items.clone(),
+                        selected_name.as_deref(),
+                        empty_label,
+                        window,
+                        cx,
+                    );
+                });
+                if let Some(sql) = sql_content {
+                    editor.update(cx, |e, cx| {
+                        e.set_value(sql.clone(), window, cx);
+                    });
+                }
+            });
 
+            if !instance.is_context_generation_current(generation) {
+                return;
+            }
             if let Some(ref db) = resolved_database {
                 if instance.supports_schema && !instance.uses_schema_as_database {
                     instance
-                        .load_schemas_for_db(global_state.clone(), db, init_schema, cx)
+                        .load_schemas_for_db(
+                            global_state.clone(),
+                            db,
+                            init_schema,
+                            generation,
+                            window_handle,
+                            cx,
+                        )
                         .await;
                 }
-                instance.update_schema_for_db(global_state, db, cx).await;
+                if instance.is_context_generation_current(generation) {
+                    instance
+                        .update_schema_for_db(global_state, db, generation, cx)
+                        .await;
+                }
             }
         })
         .detach();
@@ -1060,9 +1450,12 @@ impl SqlEditorTab {
         &self,
         global_state: GlobalDbState,
         database: &str,
+        generation: u64,
         cx: &mut AsyncApp,
     ) {
-        use crate::sql_editor::SqlSchema;
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
 
         let connection_id = self.connection_id.clone();
         let editor = self.editor.clone();
@@ -1094,6 +1487,9 @@ impl SqlEditorTab {
                 return;
             }
         };
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
 
         // Get database-specific completion info
         let db_completion_info = match global_state.get_completion_info(cx, connection_id.clone()) {
@@ -1103,6 +1499,9 @@ impl SqlEditorTab {
                 return;
             }
         };
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
 
         let mut schema = SqlSchema::default();
 
@@ -1132,6 +1531,9 @@ impl SqlEditorTab {
                 )
                 .await
             {
+                if !self.is_context_generation_current(generation) {
+                    return;
+                }
                 let column_items: Vec<(String, String, String)> = columns
                     .iter()
                     .map(|c| {
@@ -1146,10 +1548,13 @@ impl SqlEditorTab {
             }
         }
 
-        if let Ok(functions) = global_state
+        let functions = global_state
             .list_functions(cx, connection_id.clone(), db.clone())
-            .await
-        {
+            .await;
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
+        if let Ok(functions) = functions {
             let function_items = functions.into_iter().map(|function| {
                 let signature = if function.parameters.is_empty() {
                     format!("{}()", function.name)
@@ -1166,6 +1571,9 @@ impl SqlEditorTab {
         }
 
         // Update editor with schema and database-specific completion info
+        if !self.is_context_generation_current(generation) {
+            return;
+        }
         _ = editor.update(cx, |e, cx| {
             e.set_db_completion_info(db_completion_info, schema, cx);
         });
@@ -1447,6 +1855,15 @@ impl SqlEditorTab {
         self.execute_sql_text(sql, window, cx);
     }
 
+    fn handle_stop_query(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let cancelled = self
+            .sql_result_tab_container
+            .update(cx, |container, cx| container.cancel_execution(cx));
+        if cancelled && self.manual_transaction.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn handle_run_current_query_action(
         &mut self,
         _: &RunCurrentQuery,
@@ -1545,24 +1962,213 @@ impl SqlEditorTab {
         .detach();
     }
 
-    pub fn save_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.save_to_file(cx);
-    }
-
-    fn save_to_file(&self, cx: &App) {
+    pub fn save_query(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let sql = self.get_sql_text(cx);
-        let file_path = self.file_path.clone();
-
-        if let Some(parent) = file_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                error!("Failed to create directory {:?}: {}", parent, e);
-                return;
+        if self.requires_name.load(Ordering::Relaxed) {
+            if sql.trim().is_empty() {
+                return true;
+            }
+            self.show_save_name_dialog(window, cx);
+            return false;
+        }
+        match self.save_to_file(cx) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notify_save_failed(error, window, cx);
+                false
             }
         }
+    }
 
-        if let Err(e) = std::fs::write(&file_path, sql) {
-            error!("Failed to save SQL file {:?}: {}", file_path, e);
+    fn save_to_file(&self, cx: &App) -> io::Result<()> {
+        let sql = self.get_sql_text(cx);
+        let file_path = self.file_path.read().clone();
+        write_sql_file(&file_path, &sql)?;
+        self.is_dirty.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn show_save_name_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("Query.enter_query_name").to_string())
+        });
+        let input_for_focus = input.clone();
+        let view = cx.entity();
+
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let input_for_ok = input.clone();
+            let view_for_ok = view.clone();
+            dialog
+                .title(t!("Query.save_query_title").to_string())
+                .w(px(380.0))
+                .confirm()
+                .on_ok(move |_, window, cx| {
+                    let name = input_for_ok.read(cx).value().trim().to_owned();
+                    view_for_ok.update(cx, |view, cx| view.save_named_query(&name, window, cx))
+                })
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(h_flex().child(t!("Query.enter_query_name").to_string()))
+                        .child(Input::new(&input).w_full()),
+                )
+        });
+        window.defer(cx, move |window, cx| {
+            input_for_focus.update(cx, |input, cx| input.focus(window, cx));
+        });
+    }
+
+    fn show_close_save_name_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("Query.enter_query_name").to_string())
+        });
+        let input_for_focus = input.clone();
+        let view = cx.entity();
+        let (tx, rx) = oneshot::channel::<bool>();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let input_for_save = input.clone();
+            let view_for_save = view.clone();
+            let tx_cancel = tx.clone();
+            let tx_discard = tx.clone();
+            let tx_save = tx.clone();
+
+            dialog
+                .title(t!("Query.save_query_title").to_string())
+                .w(px(380.0))
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(move |_ok, _cancel, _window, _cx| {
+                    let input_for_save = input_for_save.clone();
+                    let view_for_save = view_for_save.clone();
+                    let tx_cancel = tx_cancel.clone();
+                    let tx_discard = tx_discard.clone();
+                    let tx_save = tx_save.clone();
+
+                    vec![
+                        Button::new("cancel-close-query")
+                            .label(t!("Common.cancel").to_string())
+                            .on_click(move |_, window: &mut Window, cx| {
+                                window.close_dialog(cx);
+                                if let Some(tx) = tx_cancel.lock().take() {
+                                    let _ = tx.send(false);
+                                }
+                            })
+                            .into_any_element(),
+                        Button::new("discard-close-query")
+                            .label(t!("Query.dont_save").to_string())
+                            .on_click(move |_, window: &mut Window, cx| {
+                                window.close_dialog(cx);
+                                if let Some(tx) = tx_discard.lock().take() {
+                                    let _ = tx.send(true);
+                                }
+                            })
+                            .into_any_element(),
+                        Button::new("save-close-query")
+                            .label(t!("Common.save").to_string())
+                            .primary()
+                            .on_click(move |_, window: &mut Window, cx| {
+                                let name = input_for_save.read(cx).value().trim().to_owned();
+                                let saved = view_for_save.update(cx, |view, cx| {
+                                    view.save_named_query(&name, window, cx)
+                                });
+                                if saved {
+                                    window.close_dialog(cx);
+                                    if let Some(tx) = tx_save.lock().take() {
+                                        let _ = tx.send(true);
+                                    }
+                                }
+                            })
+                            .into_any_element(),
+                    ]
+                })
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(h_flex().child(t!("Query.enter_query_name").to_string()))
+                        .child(Input::new(&input).w_full()),
+                )
+        });
+        window.defer(cx, move |window, cx| {
+            input_for_focus.update(cx, |input, cx| input.focus(window, cx));
+        });
+
+        cx.spawn(async move |_handle, _cx| rx.await.unwrap_or(false))
+    }
+
+    fn save_named_query(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let directory = self
+            .file_path
+            .read()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let file_path = match query_file_path_for_name(&directory, name) {
+            Ok(file_path) => file_path,
+            Err(error) => {
+                self.notify_query_name_error(error, window, cx);
+                return false;
+            }
+        };
+        let sql = self.get_sql_text(cx);
+        if sql.trim().is_empty() {
+            window.push_notification(t!("Query.query_content_empty").to_string(), cx);
+            return false;
         }
+        if let Err(error) = write_new_sql_file(&file_path, &sql) {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                self.notify_query_name_error(QueryFileNameError::AlreadyExists, window, cx);
+            } else {
+                self.notify_save_failed(error, window, cx);
+            }
+            return false;
+        }
+
+        *self.file_path.write() = file_path;
+        self.requires_name.store(false, Ordering::Relaxed);
+        self.finish_successful_save(window, cx);
+        true
+    }
+
+    fn notify_query_name_error(
+        &self,
+        error: QueryFileNameError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = match error {
+            QueryFileNameError::Empty => t!("Query.query_name_empty").to_string(),
+            QueryFileNameError::Invalid => t!("Query.query_name_invalid").to_string(),
+            QueryFileNameError::AlreadyExists => t!("Query.query_name_exists").to_string(),
+            QueryFileNameError::ReadDirectory(error) => {
+                t!("Query.query_save_failed", error = error).to_string()
+            }
+        };
+        window.push_notification(Notification::error(message).autohide(true), cx);
+    }
+
+    fn notify_save_failed(&self, error: io::Error, window: &mut Window, cx: &mut Context<Self>) {
+        let message = t!("Query.query_save_failed", error = error).to_string();
+        window.push_notification(Notification::error(message).autohide(true), cx);
+    }
+
+    fn finish_successful_save(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_dirty.store(false, Ordering::Relaxed);
+        window.push_notification(t!("Query.query_saved").to_string(), cx);
+        cx.emit(SqlEditorEvent::QuerySaved {
+            connection_id: self.connection_id.clone(),
+            database: self.database_select.read(cx).selected_value().cloned(),
+        });
     }
 
     pub fn save_and_close(
@@ -1572,9 +2178,11 @@ impl SqlEditorTab {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.save_to_file(cx);
+        if !self.save_query(_window, cx) {
+            return;
+        }
         tab_container.update(cx, |container, cx| {
-            container.force_close_tab_by_id(&tab_id, cx);
+            container.force_close_tab_by_id(&tab_id, _window, cx);
         });
         cx.emit(SqlEditorEvent::QuerySaved {
             connection_id: self.connection_id.clone(),
@@ -1589,12 +2197,14 @@ impl SqlEditorTab {
             return;
         }
 
-        self.save_to_file(cx);
-        window.push_notification(t!("Query.query_saved").to_string(), cx);
-        cx.emit(SqlEditorEvent::QuerySaved {
-            connection_id: self.connection_id.clone(),
-            database: self.database_select.read(cx).selected_value().cloned(),
-        });
+        if self.requires_name.load(Ordering::Relaxed) {
+            self.show_save_name_dialog(window, cx);
+            return;
+        }
+        match self.save_to_file(cx) {
+            Ok(()) => self.finish_successful_save(window, cx),
+            Err(error) => self.notify_save_failed(error, window, cx),
+        }
     }
 
     fn handle_show_results(
@@ -1739,6 +2349,7 @@ impl SqlEditorTab {
 
     fn render_sql_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = self.editor.clone();
+        let connection_select = self.connection_select.clone();
         let database_select = self.database_select.clone();
         let schema_select = self.schema_select.clone();
         let transaction_mode_select = self.transaction_mode_select.clone();
@@ -1755,6 +2366,7 @@ impl SqlEditorTab {
 
         // Check if there is selected text in the editor
         let has_selection = !self.editor.read(cx).get_selected_text(cx).trim().is_empty();
+        let toolbar_action = query_toolbar_action(is_query_executing, has_selection);
 
         v_flex()
             .size_full()
@@ -1768,6 +2380,14 @@ impl SqlEditorTab {
                     .rounded_md()
                     .items_center()
                     .w_full()
+                    .child(
+                        Select::new(&connection_select)
+                            .with_size(Size::Small)
+                            .placeholder(t!("Query.select_connection"))
+                            .search_placeholder(t!("Query.search_connection"))
+                            .disabled(is_query_executing || has_manual_transaction)
+                            .w(px(220.)),
+                    )
                     .when(!uses_schema_as_database, |this| {
                         this.child(
                             // Database selector (for non-Oracle databases)
@@ -1824,21 +2444,26 @@ impl SqlEditorTab {
                                 .on_click(cx.listener(Self::handle_rollback_transaction)),
                         )
                     })
-                    .child(
-                        Button::new("run-query")
+                    .child(match toolbar_action {
+                        QueryToolbarAction::Stop => Button::new("stop-query")
+                            .with_size(Size::Small)
+                            .danger()
+                            .label(t!("Query.stop"))
+                            .icon(IconName::CircleX)
+                            .on_click(cx.listener(Self::handle_stop_query)),
+                        QueryToolbarAction::RunSelected => Button::new("run-query")
                             .with_size(Size::Small)
                             .primary()
-                            .loading(is_query_executing)
-                            .label(if is_query_executing {
-                                t!("Query.running")
-                            } else if has_selection {
-                                t!("Query.run_selected")
-                            } else {
-                                t!("Query.run")
-                            })
+                            .label(t!("Query.run_selected"))
                             .icon(IconName::ArrowRight)
                             .on_click(cx.listener(Self::handle_run_query)),
-                    )
+                        QueryToolbarAction::Run => Button::new("run-query")
+                            .with_size(Size::Small)
+                            .primary()
+                            .label(t!("Query.run"))
+                            .icon(IconName::ArrowRight)
+                            .on_click(cx.listener(Self::handle_run_query)),
+                    })
                     .child(
                         Button::new("explain-sql")
                             .with_size(Size::Small)
@@ -1922,6 +2547,7 @@ impl Clone for SqlEditorTab {
             connection_id: self.connection_id.clone(),
             database_type: self.database_type.clone(),
             sql_result_tab_container: self.sql_result_tab_container.clone(),
+            connection_select: self.connection_select.clone(),
             database_select: self.database_select.clone(),
             schema_select: self.schema_select.clone(),
             transaction_mode_select: self.transaction_mode_select.clone(),
@@ -1929,6 +2555,7 @@ impl Clone for SqlEditorTab {
             uses_schema_as_database: self.uses_schema_as_database,
             focus_handle: self.focus_handle.clone(),
             file_path: self.file_path.clone(),
+            requires_name: self.requires_name.clone(),
             _save_task: None,
             result_panel_size: self.result_panel_size,
             resizing: false,
@@ -1937,6 +2564,7 @@ impl Clone for SqlEditorTab {
             manual_transaction: self.manual_transaction.clone(),
             auto_save_seq: self.auto_save_seq.clone(),
             is_dirty: self.is_dirty.clone(),
+            context_generation: self.context_generation.clone(),
         }
     }
 }
@@ -1978,8 +2606,10 @@ impl TabContent for SqlEditorTab {
             window.push_notification(t!("Query.transaction_finish_before_close").to_string(), cx);
             return Task::ready(false);
         }
-        self.save_query(window, cx);
-        Task::ready(true)
+        if self.requires_name.load(Ordering::Relaxed) && !self.get_sql_text(cx).trim().is_empty() {
+            return self.show_close_save_name_dialog(window, cx);
+        }
+        Task::ready(self.save_query(window, cx))
     }
 }
 
@@ -2073,17 +2703,21 @@ impl Element for ResizeEventHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManualTransactionAction, ManualTransactionSession, RUN_ALL_QUERY_KEY_BINDINGS,
-        RUN_CURRENT_QUERY_KEY_BINDINGS, RunCurrentQuery, SQL_EDITOR_CONTEXT,
-        SQL_EDITOR_INPUT_CONTEXT, ToggleLineComment, initial_database_select_value,
-        manual_transaction_control_sql, should_render_schema_select, sql_text_for_run_all,
+        ManualTransactionAction, ManualTransactionSession, QueryFileNameError, QueryToolbarAction,
+        RUN_ALL_QUERY_KEY_BINDINGS, RUN_CURRENT_QUERY_KEY_BINDINGS, RunCurrentQuery,
+        SQL_EDITOR_CONTEXT, SQL_EDITOR_INPUT_CONTEXT, ToggleLineComment,
+        can_switch_query_connection, initial_database_select_value,
+        is_current_query_context_generation, manual_transaction_control_sql,
+        query_connection_context_label, query_connection_ids, query_file_path_for_name,
+        query_toolbar_action, should_render_schema_select, sql_text_for_run_all,
         sql_text_for_run_current, sql_text_for_run_cursor_statement, sql_text_for_toolbar_run,
-        supports_manual_transactions, toggle_sql_line_comments,
+        supports_manual_transactions, toggle_sql_line_comments, write_new_sql_file, write_sql_file,
     };
     use db::DbManager;
     use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
     use gpui_component::input;
     use one_core::storage::DatabaseType;
+    use std::path::PathBuf;
 
     const WIRE_PREFIX: &str = "/*onetcli-ipc-wire*/ ";
 
@@ -2109,6 +2743,187 @@ mod tests {
                     .map(str::to_string)
             })
             .or(Some(sql))
+    }
+
+    fn temp_query_dir(test_name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "navop-sql-editor-{test_name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).expect("temporary query directory should be created");
+        path
+    }
+
+    #[test]
+    fn query_connection_context_distinguishes_same_database_across_connections() {
+        let production = query_connection_context_label("生产环境", "prod.example.com:5432");
+        let staging = query_connection_context_label("测试环境", "staging.example.com:5432");
+
+        assert_eq!("生产环境 · prod.example.com:5432", production);
+        assert_eq!("测试环境 · staging.example.com:5432", staging);
+        assert_ne!(production, staging);
+    }
+
+    #[test]
+    fn query_connection_context_uses_available_connection_details() {
+        assert_eq!(
+            "本地数据库",
+            query_connection_context_label("本地数据库", "")
+        );
+        assert_eq!(
+            "/tmp/app.db",
+            query_connection_context_label("", "/tmp/app.db")
+        );
+    }
+
+    #[test]
+    fn query_connection_ids_keep_workspace_order_and_current_connection() {
+        let available = vec![
+            "connection-2".to_string(),
+            "connection-1".to_string(),
+            "connection-2".to_string(),
+        ];
+
+        assert_eq!(
+            vec!["connection-2", "connection-1"],
+            query_connection_ids(&available, "connection-1")
+        );
+        assert_eq!(
+            vec!["connection-2", "connection-1", "connection-3"],
+            query_connection_ids(&available, "connection-3")
+        );
+    }
+
+    #[test]
+    fn query_connection_switch_is_blocked_while_query_or_transaction_is_active() {
+        assert!(can_switch_query_connection(false, false));
+        assert!(!can_switch_query_connection(true, false));
+        assert!(!can_switch_query_connection(false, true));
+        assert!(!can_switch_query_connection(true, true));
+    }
+
+    #[test]
+    fn stale_query_context_generation_is_rejected() {
+        assert!(is_current_query_context_generation(3, 3));
+        assert!(!is_current_query_context_generation(2, 3));
+    }
+
+    #[test]
+    fn query_file_path_requires_non_empty_name() {
+        let directory = temp_query_dir("empty-name");
+
+        assert_eq!(
+            Err(QueryFileNameError::Empty),
+            query_file_path_for_name(&directory, "")
+        );
+        assert_eq!(
+            Err(QueryFileNameError::Empty),
+            query_file_path_for_name(&directory, "   ")
+        );
+
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn query_file_path_rejects_path_components() {
+        let directory = temp_query_dir("path-components");
+
+        assert_eq!(
+            Err(QueryFileNameError::Invalid),
+            query_file_path_for_name(&directory, "../report")
+        );
+        assert_eq!(
+            Err(QueryFileNameError::Invalid),
+            query_file_path_for_name(&directory, "nested/report")
+        );
+
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn query_file_path_rejects_cross_platform_invalid_names() {
+        let directory = temp_query_dir("invalid-names");
+
+        assert_eq!(
+            Err(QueryFileNameError::Invalid),
+            query_file_path_for_name(&directory, "report:daily")
+        );
+        assert_eq!(
+            Err(QueryFileNameError::Invalid),
+            query_file_path_for_name(&directory, "CON")
+        );
+        assert_eq!(
+            Err(QueryFileNameError::Invalid),
+            query_file_path_for_name(&directory, "nul.sql")
+        );
+
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn query_file_path_appends_sql_extension_once() {
+        let directory = temp_query_dir("extension");
+
+        assert_eq!(
+            Ok(directory.join("report.sql")),
+            query_file_path_for_name(&directory, "report")
+        );
+        assert_eq!(
+            Ok(directory.join("report.sql")),
+            query_file_path_for_name(&directory, "report.sql")
+        );
+
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn query_file_path_rejects_duplicate_name_case_insensitively() {
+        let directory = temp_query_dir("duplicate");
+        let existing_path = directory.join("Report.sql");
+        std::fs::write(&existing_path, "select 1;").expect("fixture query should be written");
+
+        assert_eq!(
+            Err(QueryFileNameError::AlreadyExists),
+            query_file_path_for_name(&directory, "report")
+        );
+        assert_eq!(
+            "select 1;",
+            std::fs::read_to_string(existing_path).expect("fixture query should remain readable")
+        );
+
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn write_sql_file_overwrites_current_named_query() {
+        let directory = temp_query_dir("overwrite");
+        let file_path = directory.join("report.sql");
+        std::fs::write(&file_path, "select 1;").expect("fixture query should be written");
+
+        write_sql_file(&file_path, "select 2;").expect("named query should be overwritten");
+
+        assert_eq!(
+            "select 2;",
+            std::fs::read_to_string(file_path).expect("saved query should be readable")
+        );
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
+    }
+
+    #[test]
+    fn write_new_sql_file_does_not_overwrite_existing_query() {
+        let directory = temp_query_dir("create-new");
+        let file_path = directory.join("report.sql");
+        std::fs::write(&file_path, "select 1;").expect("fixture query should be written");
+
+        let error = write_new_sql_file(&file_path, "select 2;")
+            .expect_err("new query save should reject an existing file");
+
+        assert_eq!(std::io::ErrorKind::AlreadyExists, error.kind());
+        assert_eq!(
+            "select 1;",
+            std::fs::read_to_string(file_path).expect("existing query should remain unchanged")
+        );
+        std::fs::remove_dir_all(directory).expect("temporary query directory should be removed");
     }
 
     #[test]
@@ -2343,6 +3158,17 @@ mod tests {
         assert!(!supports_manual_transactions(&DatabaseType::External {
             driver_id: "demo".to_string(),
         }));
+    }
+
+    #[test]
+    fn executing_query_toolbar_action_is_stop_and_remains_clickable() {
+        assert_eq!(QueryToolbarAction::Stop, query_toolbar_action(true, false));
+        assert_eq!(QueryToolbarAction::Stop, query_toolbar_action(true, true));
+        assert_eq!(
+            QueryToolbarAction::RunSelected,
+            query_toolbar_action(false, true)
+        );
+        assert_eq!(QueryToolbarAction::Run, query_toolbar_action(false, false));
     }
 
     #[test]

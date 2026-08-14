@@ -7,7 +7,7 @@ use super::*;
 use crate::pointer::scale_filled_remote_cursor_bounds;
 
 struct RemoteDesktopCanvasPaint {
-    frame: Option<Arc<RenderImage>>,
+    frame: Option<Arc<surface::RemoteDesktopSurface>>,
     cursor: Option<cursor::RemoteCursorPaint>,
 }
 
@@ -29,14 +29,85 @@ fn remote_desktop_frame_canvas(frame: RemoteDesktopCanvasPaint) -> impl IntoElem
 
 fn paint_remote_frame(
     bounds: Bounds<Pixels>,
-    frame: Option<Arc<RenderImage>>,
+    frame: Option<Arc<surface::RemoteDesktopSurface>>,
     window: &mut Window,
 ) {
     let Some(frame) = frame else {
         return;
     };
-    if let Err(error) = window.paint_image(bounds, Corners::default(), frame, 0, false) {
-        tracing::warn!(?error, "failed to paint remote desktop frame");
+
+    let renderer_resource_generation = window.renderer_resource_generation();
+    let uploads = frame.pending_texture_uploads(renderer_resource_generation);
+    let diagnostics_enabled = remote_desktop_diagnostics_enabled();
+    let upload_started_at = diagnostics_enabled.then(Instant::now);
+    let mut uploaded_count = 0;
+    let mut uploaded_bytes = 0usize;
+    let mut uploaded_pixels = 0u64;
+    let mut largest_upload_pixels = 0u64;
+    for upload in uploads.iter() {
+        let update_bounds = Bounds::new(
+            point(
+                DevicePixels(i32::from(upload.rect.x)),
+                DevicePixels(i32::from(upload.rect.y)),
+            ),
+            size(
+                DevicePixels(i32::from(upload.rect.width)),
+                DevicePixels(i32::from(upload.rect.height)),
+            ),
+        );
+        match window.update_dynamic_texture(
+            frame.texture().as_ref(),
+            update_bounds,
+            upload.bytes.as_slice(),
+        ) {
+            Ok(()) => {
+                uploaded_count += 1;
+                if diagnostics_enabled {
+                    let pixels =
+                        u64::from(upload.rect.width).saturating_mul(u64::from(upload.rect.height));
+                    uploaded_bytes = uploaded_bytes.saturating_add(upload.bytes.len());
+                    uploaded_pixels = uploaded_pixels.saturating_add(pixels);
+                    largest_upload_pixels = largest_upload_pixels.max(pixels);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, "failed to update remote desktop texture");
+                break;
+            }
+        }
+    }
+    if uploaded_count > 0 {
+        frame.acknowledge_texture_uploads(&uploads[..uploaded_count]);
+    }
+    if let Some(upload_started_at) = upload_started_at
+        && uploaded_count > 0
+    {
+        let framebuffer_pixels = u64::from(frame.width()).saturating_mul(u64::from(frame.height()));
+        let ratio_per_mille = uploaded_pixels
+            .saturating_mul(1000)
+            .checked_div(framebuffer_pixels)
+            .unwrap_or_default();
+        let largest_ratio_per_mille = largest_upload_pixels
+            .saturating_mul(1000)
+            .checked_div(framebuffer_pixels)
+            .unwrap_or_default();
+        tracing::info!(
+            surface_width = frame.width(),
+            surface_height = frame.height(),
+            upload_count = uploaded_count,
+            upload_bytes = uploaded_bytes,
+            upload_pixels = uploaded_pixels,
+            upload_ratio_per_mille = ratio_per_mille,
+            largest_upload_ratio_per_mille = largest_ratio_per_mille,
+            upload_us = upload_started_at.elapsed().as_micros() as u64,
+            "remote desktop dynamic texture uploads"
+        );
+    }
+
+    if let Err(error) =
+        window.paint_dynamic_texture(bounds, Corners::default(), frame.texture().clone(), false)
+    {
+        tracing::warn!(?error, "failed to paint remote desktop texture");
     }
 }
 
@@ -235,6 +306,14 @@ impl TabContent for RemoteDesktopView {
     ) -> Task<bool> {
         self.cursor.reset_session();
         close_runtime_once(&mut self.input_tx);
+        self.output_rx.take();
+        self.presentation_tx.take();
+        self.presentation_queue.clear();
+        self.presentation_in_flight = false;
+        self.reset_presentation_pacing();
+        self._initial_layout_task.take();
+        self._output_ready_task.take();
+        self._presentation_task.take();
 
         #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
         {
@@ -321,13 +400,12 @@ impl TabContent for RemoteDesktopView {
 
 impl Render for RemoteDesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Only release frames retired by the previous render. A reconnect can
-        // reset the session while draining output below; delaying those drops
-        // until the next render keeps the image alive until the scene that
-        // referenced it has been replaced.
-        for frame in self.pending_frame_drops.drain(..) {
-            if let Err(error) = window.drop_image(frame) {
-                tracing::warn!(?error, "failed to release remote desktop frame");
+        // Retired textures stay queued until no presentation state or rendered
+        // frame owns them. This also retries retirement after an asynchronous
+        // session reset releases its last surface.
+        for texture in self.retired_textures.take_releasable() {
+            if let Err(error) = window.drop_dynamic_texture(texture) {
+                tracing::warn!(?error, "failed to release remote desktop texture");
             }
         }
         for cursor in self.cursor.take_pending_images() {
@@ -338,13 +416,24 @@ impl Render for RemoteDesktopView {
         self.drain_output(window, cx);
         self.sync_local_clipboard(window, cx);
         self.ensure_presentation(window, cx);
-        self.flush_pending_start();
+        self.flush_pending_start(cx);
         self.flush_pending_resize();
-        if let Some(latest_frame) = self.latest_frame.clone()
-            && let Some(retired) = self.rendered_frames.promote(latest_frame)
-            && let Err(error) = window.drop_image(retired)
-        {
-            tracing::warn!(?error, "failed to retire remote desktop frame");
+        if let Some(latest_frame) = self.latest_frame.take() {
+            let frame_presented = self.rendered_frames.current() != Some(&latest_frame);
+            if let Some(retired) = self.rendered_frames.promote(latest_frame) {
+                self.retired_textures.retire(retired);
+            }
+            if frame_presented {
+                let snapshot = self.frame_sync.snapshot();
+                tracing::trace!(
+                    protocol = self.options.protocol.label(),
+                    session_generation = snapshot.session_generation,
+                    frame_presented = 1,
+                    full_frames = snapshot.full_frames,
+                    deltas = snapshot.deltas,
+                    "remote desktop frame presented"
+                );
+            }
         }
         if let Some(retired) = self.cursor.promote_latest()
             && let Err(error) = window.drop_image(retired)
@@ -372,7 +461,7 @@ impl Render for RemoteDesktopView {
         let content = div()
             .id("remote-desktop-content")
             .w_full()
-            .flex_grow(1.0)
+            .flex_grow()
             .min_w_0()
             .min_h_0()
             .relative()
@@ -511,8 +600,8 @@ impl Render for RemoteDesktopView {
                 },
             )
             .on_prepaint(move |bounds, window, cx| {
-                view.update(cx, |view, _| {
-                    view.update_content_bounds(bounds, window.scale_factor());
+                view.update(cx, |view, cx| {
+                    view.update_content_bounds(bounds, window.scale_factor(), cx);
                 });
             });
 

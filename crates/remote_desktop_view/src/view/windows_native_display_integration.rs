@@ -1,11 +1,44 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use gpui::{Bounds, Pixels, point, px};
+use gpui::{AnyWindowHandle, Bounds, Context, Pixels, Task, point, px};
 
 use super::RemoteDesktopView;
 use super::windows_native_display::{WindowsNativeDisplayRequest, WindowsNativeViewportSettings};
 
+const WINDOWS_NATIVE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(33);
+
 impl RemoteDesktopView {
+    pub(super) fn spawn_windows_native_maintenance_task(
+        window_handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let focus_handle = match this.update(cx, |this, cx| {
+                    if !this.uses_windows_native_presentation() {
+                        return None;
+                    }
+
+                    let focus_handle = this.poll_windows_native_events();
+                    this.flush_windows_native_display_settings(Instant::now());
+                    cx.notify();
+                    focus_handle
+                }) {
+                    Ok(focus_handle) => focus_handle,
+                    Err(_) => break,
+                };
+                if let Some(focus_handle) = focus_handle {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        window.focus(&focus_handle, cx);
+                    });
+                }
+                cx.background_executor()
+                    .timer(WINDOWS_NATIVE_MAINTENANCE_INTERVAL)
+                    .await;
+            }
+        })
+    }
+
     pub(super) fn observe_windows_native_viewport(
         &mut self,
         bounds: Bounds<Pixels>,

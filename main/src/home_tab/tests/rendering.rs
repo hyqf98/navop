@@ -118,7 +118,7 @@ fn home_overview_is_compact_and_avoids_duplicate_search() {
     assert!(content.contains("max_w(px(1160.0))"));
     assert!(content.contains("MODERN_HOME_CARD_MIN_WIDTH"));
     assert!(content.contains("MODERN_HOME_CARD_MAX_WIDTH"));
-    assert!(content.contains(".flex_grow(1.0)"));
+    assert!(content.contains(".flex_grow()"));
     assert!(card.contains("px(76.0)"));
     assert!(!card.contains(".shadow_sm()\n            .group"));
     assert!(render.contains("self.render_modern_home(window, cx)"));
@@ -160,11 +160,11 @@ fn modern_start_center_separates_primary_work_from_supporting_tools() {
     assert!(modern_home.contains(".flex_basis(START_CENTER_MAIN_COLUMN_WIDTH)"));
     assert!(modern_home.contains(".flex_basis(START_CENTER_SIDE_COLUMN_WIDTH)"));
     assert!(modern_home.contains(".items_stretch()"));
-    assert!(modern_home.contains(".flex_grow(2.0)"));
-    assert!(modern_home.contains(".flex_grow(1.0)"));
+    assert!(modern_home.contains(".flex_grow_factor(2.0)"));
+    assert!(modern_home.contains(".flex_grow()"));
     assert!(
         modern_home
-            .contains("surface_panel(\"modern-home-status-panel\", cx)\n        .flex_grow(1.0)")
+            .contains("surface_panel(\"modern-home-status-panel\", cx)\n        .flex_grow()")
     );
     assert!(modern_home.contains("render_recent_connections_panel"));
     assert!(modern_home.contains("render_create_panel"));
@@ -219,7 +219,6 @@ fn persistent_sidebar_supports_connection_group_drag_and_drop() {
         rows.contains("home.move_connection_to_workspace(drag.connection_id, workspace_id, cx);")
     );
     assert!(rows.contains("Some(id)"));
-    assert!(rows.contains("None"));
     assert!(grouping.contains("repo.update_workspace("));
     assert!(grouping.contains("ConnectionDataEvent::ConnectionUpdated"));
 }
@@ -237,20 +236,27 @@ fn persistent_sidebar_groups_expose_a_rename_interaction() {
 #[test]
 fn legacy_and_modern_home_layouts_are_both_kept() {
     let render = include_str!("../render.rs");
+    let legacy_home = include_str!("../legacy_home.rs");
     let content = include_str!("../content.rs");
     let card = include_str!("../connection_card.rs");
     let sidebar = include_str!("../sidebar.rs");
 
-    assert!(render.contains("self.home_page_style == HomePageStyle::Legacy"));
+    assert!(render.contains("self.render_legacy_home(window, cx)"));
+    assert!(render.contains("self.render_modern_home(window, cx)"));
+    assert!(legacy_home.contains("self.render_sidebar(window, cx)"));
     assert!(content.contains("slot.w(px(320.0)).flex_shrink_0()"));
     assert!(content.contains("slot.min_w(MODERN_HOME_CARD_MIN_WIDTH)"));
     assert!(card.contains("if legacy { px(90.0) } else { px(76.0) }"));
+    assert!(!sidebar.contains("\"legacy-open-home\""));
+    assert!(sidebar.contains("ConnectionType::all()"));
+    assert!(sidebar.contains("this.set_selected_filter(filter, cx);"));
     assert!(sidebar.contains("legacy-home-sidebar-toggle"));
-    assert!(sidebar.contains("ObjectIcon::new(IconName::User)"));
+    assert!(sidebar.contains("FunctionalIcon::new(IconName::User)"));
+    assert!(!sidebar.contains("ObjectIcon::new(IconName::User)"));
 }
 
 #[test]
-fn legacy_ai_workbench_uses_an_object_glyph_icon() {
+fn legacy_ai_workbench_uses_the_original_color_icon() {
     let sidebar = include_str!("../sidebar.rs");
     let ai_entry = sidebar
         .split(".when(show_ai_workbench")
@@ -259,8 +265,8 @@ fn legacy_ai_workbench_uses_an_object_glyph_icon() {
         .expect("legacy AI workbench sidebar entry");
 
     assert!(ai_entry.contains("\"legacy-open-ai-workbench\""));
-    assert!(ai_entry.contains("IconName::AILine"));
-    assert!(!ai_entry.contains("IconName::AI,"));
+    assert!(ai_entry.contains("IconName::AI,"));
+    assert!(!ai_entry.contains("IconName::AILine"));
 }
 
 #[test]
@@ -276,7 +282,7 @@ fn modern_home_cards_are_small_and_fill_each_row() {
             .count()
             >= 3
     );
-    assert!(content.matches(".flex_grow(1.0)").count() >= 3);
+    assert!(content.matches(".flex_grow()").count() >= 3);
 }
 
 #[test]

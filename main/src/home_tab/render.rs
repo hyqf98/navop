@@ -6,30 +6,6 @@ impl Focusable for HomePage {
     }
 }
 
-impl EventEmitter<TabContentEvent> for HomePage {}
-
-impl TabContent for HomePage {
-    fn content_key(&self) -> &'static str {
-        "Home"
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        SharedString::from(t!("Home.title"))
-    }
-
-    fn icon(&self, _cx: &App) -> Option<Icon> {
-        Some(IconName::Home.color())
-    }
-
-    fn closeable(&self, _cx: &App) -> bool {
-        false
-    }
-
-    fn width_size(&self, _cx: &App) -> Option<Size> {
-        Some(Size::Small)
-    }
-}
-
 impl Render for HomePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let global_user = GlobalCurrentUser::get_user(cx);
@@ -81,47 +57,15 @@ impl Render for HomePage {
             });
         }
 
-        let legacy = self.home_page_style == HomePageStyle::Legacy;
-        let content = v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_hidden()
-            .bg(cx.theme().background)
-            .when(legacy, |content| {
-                content.child(self.render_toolbar(window, cx))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .bg(if legacy {
-                        cx.theme().muted
-                    } else {
-                        cx.theme().background
-                    })
-                    .child(if legacy {
-                        self.render_content_area(cx)
-                    } else {
-                        self.render_modern_home(window, cx)
-                    }),
-            );
+        let content = match self.home_page_style {
+            HomePageStyle::Legacy => self.render_legacy_home(window, cx),
+            HomePageStyle::Modern => self.render_modern_home(window, cx),
+        };
 
         div()
             .size_full()
             .min_w_0()
             .track_focus(&self.focus_handle)
-            .child(
-                h_flex()
-                    .size_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .when(self.home_page_style == HomePageStyle::Legacy, |layout| {
-                        layout.child(self.render_sidebar(window, cx))
-                    })
-                    .child(content),
-            )
+            .child(content)
     }
 }

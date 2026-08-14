@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext, Context, Entity, EventEmitter, Hsla, IntoElement, ParentElement, Pixels, Render,
@@ -12,7 +10,9 @@ use gpui_component::{
 use terminal_view::TerminalColors;
 
 use crate::home_tab::HomePage;
+use selection::ConnectionSelection;
 
+mod batch_toolbar;
 mod connection_command;
 mod connection_context_menu;
 mod connection_copy;
@@ -20,12 +20,15 @@ mod connection_copy_menu;
 mod connection_share;
 mod context_menu;
 mod drag;
+mod header_actions;
 mod rail;
 mod resize;
 #[cfg(test)]
 mod resize_contract_tests;
 mod row_parts;
 mod rows;
+mod selection;
+mod state;
 mod tree;
 mod tree_model;
 mod workspace_context_menu;
@@ -99,9 +102,9 @@ fn shade(color: Hsla, dark_mode: bool) -> Hsla {
 
 pub(crate) struct PersistentConnectionSidebar {
     pub(super) home_page: Entity<HomePage>,
+    connection_selection: ConnectionSelection,
     pub(super) tree_expanded: bool,
-    pub(super) collapsed_workspaces: HashSet<i64>,
-    pub(super) unassigned_collapsed: bool,
+    pub(super) hide_empty_workspaces: bool,
     pub(super) search_input: Entity<InputState>,
     tree_width: Pixels,
     terminal_colors: Option<TerminalColors>,
@@ -121,7 +124,20 @@ impl PersistentConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&home_page, |_, _, cx| cx.notify()).detach();
+        cx.observe(&home_page, |this, home, cx| {
+            let home = home.read(cx);
+            let valid_ids = home
+                .connections
+                .iter()
+                .filter_map(|connection| {
+                    let id = connection.id?;
+                    home.can_move_connection(id).then_some(id)
+                })
+                .collect();
+            this.connection_selection.retain(&valid_ids);
+            cx.notify();
+        })
+        .detach();
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("Connection.search_placeholder").to_string())
@@ -133,11 +149,12 @@ impl PersistentConnectionSidebar {
             }
         })
         .detach();
+        let tree_state = one_core::settings::AppSettings::current(cx).connection_sidebar_tree_state;
         Self {
             home_page,
+            connection_selection: ConnectionSelection::default(),
             tree_expanded,
-            collapsed_workspaces: HashSet::new(),
-            unassigned_collapsed: false,
+            hide_empty_workspaces: tree_state.hide_empty_workspaces,
             search_input,
             tree_width: cx.theme().geometry.layout.context_sidebar_default,
             terminal_colors: None,
@@ -188,5 +205,6 @@ impl Render for PersistentConnectionSidebar {
             .when(self.tree_expanded, |this| {
                 this.child(self.render_connection_tree(palette, window, cx))
             })
+            .into_any_element()
     }
 }

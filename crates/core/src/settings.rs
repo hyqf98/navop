@@ -1,6 +1,9 @@
 use crate::cloud_sync::{GlobalCloudUser, UserInfo};
 use crate::storage::get_config_dir;
 use crate::utils::auto_save_config::AutoSaveConfig;
+use agent_runtime::{
+    DEFAULT_AGENT_MAX_ITERATIONS, MAX_AGENT_MAX_ITERATIONS, MIN_AGENT_MAX_ITERATIONS,
+};
 use gpui::http_client::Url;
 use gpui::{App, Font, FontFallbacks, Global, font, px};
 use gpui_component::{Theme, ThemeMode};
@@ -458,10 +461,36 @@ pub enum AiChatToolExecutionMode {
     Manual,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiChatSettings {
     #[serde(default)]
     pub tool_execution_mode: AiChatToolExecutionMode,
+    #[serde(
+        default = "default_agent_max_iterations",
+        deserialize_with = "deserialize_agent_max_iterations"
+    )]
+    pub max_iterations: usize,
+}
+
+fn default_agent_max_iterations() -> usize {
+    DEFAULT_AGENT_MAX_ITERATIONS
+}
+
+fn deserialize_agent_max_iterations<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    Ok(value.clamp(MIN_AGENT_MAX_ITERATIONS, MAX_AGENT_MAX_ITERATIONS))
+}
+
+impl Default for AiChatSettings {
+    fn default() -> Self {
+        Self {
+            tool_execution_mode: AiChatToolExecutionMode::default(),
+            max_iterations: default_agent_max_iterations(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -692,6 +721,12 @@ fn format_legacy_custom_command(program: &str, arguments: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionSidebarTreeState {
+    #[serde(default)]
+    pub hide_empty_workspaces: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -779,6 +814,8 @@ pub struct AppSettings {
     pub personal_sync: PersonalSyncSettings,
     #[serde(default)]
     pub remote_file_editor: RemoteFileEditorUserSettings,
+    #[serde(default = "default_true")]
+    pub direct_server_transfer_enabled: bool,
     #[serde(default)]
     pub database_open_mode: DatabaseOpenMode,
     #[serde(default)]
@@ -797,6 +834,8 @@ pub struct AppSettings {
     pub home_page_style: HomePageStyle,
     #[serde(default = "default_true")]
     pub connection_sidebar_expanded: bool,
+    #[serde(default)]
+    pub connection_sidebar_tree_state: ConnectionSidebarTreeState,
     /// 是否启用SQL查询的自动保存功能
     #[serde(default = "default_true")]
     pub enable_sql_auto_save: bool,
@@ -1115,6 +1154,7 @@ impl Default for AppSettings {
             ai_chat: AiChatSettings::default(),
             personal_sync: PersonalSyncSettings::default(),
             remote_file_editor: RemoteFileEditorUserSettings::default(),
+            direct_server_transfer_enabled: true,
             database_open_mode: DatabaseOpenMode::default(),
             large_text_cell_editor_open_mode: LargeTextCellEditorOpenMode::default(),
             startup_default_page: StartupDefaultPage::default(),
@@ -1123,6 +1163,7 @@ impl Default for AppSettings {
             home_connection_layout: HomeConnectionLayout::default(),
             home_page_style: HomePageStyle::default(),
             connection_sidebar_expanded: true,
+            connection_sidebar_tree_state: ConnectionSidebarTreeState::default(),
             enable_sql_auto_save: true,
             sql_auto_save_interval: default_auto_save_interval(),
             system_hotkey_macos: default_system_hotkey_macos(),
@@ -1361,7 +1402,7 @@ mod tests {
     use gpui_component::{Theme, ThemeMode};
 
     use super::{
-        AiChatToolExecutionMode, AppSettings, CustomFont, DEFAULT_TERMINAL_THEME,
+        AiChatSettings, AiChatToolExecutionMode, AppSettings, CustomFont, DEFAULT_TERMINAL_THEME,
         HomeConnectionLayout, HomePageStyle, LOCALE_SYSTEM, LargeTextCellEditorOpenMode,
         LocalTerminalProfileKind, LocalTerminalProfileSettings, McpPermissionMode, McpServerMode,
         PersonalSyncBackendKind, RemoteFileOpenMode, StartupDefaultPage, SyncProvider,
@@ -1373,6 +1414,29 @@ mod tests {
     #[test]
     fn app_settings_disables_sync_by_default() {
         assert!(!AppSettings::default().sync_enabled);
+    }
+
+    #[test]
+    fn app_settings_enables_direct_server_transfer_by_default() {
+        assert!(AppSettings::default().direct_server_transfer_enabled);
+    }
+
+    #[test]
+    fn legacy_app_settings_keep_direct_server_transfer_enabled() {
+        let settings: AppSettings =
+            serde_json::from_value(serde_json::json!({})).expect("旧版设置应能反序列化");
+
+        assert!(settings.direct_server_transfer_enabled);
+    }
+
+    #[test]
+    fn app_settings_deserializes_direct_server_transfer_choice() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "direct_server_transfer_enabled": false
+        }))
+        .expect("服务器间直接传输设置应能反序列化");
+
+        assert!(!settings.direct_server_transfer_enabled);
     }
 
     #[test]
@@ -1673,6 +1737,26 @@ mod tests {
         assert_eq!(HomeConnectionLayout::List, settings.home_connection_layout);
         assert_eq!(HomePageStyle::Legacy, settings.home_page_style);
         assert!(!settings.connection_sidebar_expanded);
+        assert!(!settings.connection_sidebar_tree_state.hide_empty_workspaces);
+    }
+
+    #[test]
+    fn app_settings_defaults_to_showing_empty_workspaces() {
+        let settings = AppSettings::default();
+
+        assert!(!settings.connection_sidebar_tree_state.hide_empty_workspaces);
+    }
+
+    #[test]
+    fn app_settings_deserializes_connection_sidebar_tree_state() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "connection_sidebar_tree_state": {
+                "hide_empty_workspaces": true
+            }
+        }))
+        .expect("connection sidebar tree state should deserialize");
+
+        assert!(settings.connection_sidebar_tree_state.hide_empty_workspaces);
     }
 
     #[test]
@@ -2058,6 +2142,47 @@ mod tests {
         assert_eq!(
             AiChatToolExecutionMode::ReadOnly,
             restored.ai_chat.tool_execution_mode
+        );
+    }
+
+    #[test]
+    fn ai_chat_max_iterations_defaults_for_legacy_settings() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({"locale": "zh-CN"}))
+            .expect("旧版设置应能反序列化");
+
+        assert_eq!(
+            agent_runtime::DEFAULT_AGENT_MAX_ITERATIONS,
+            settings.ai_chat.max_iterations
+        );
+    }
+
+    #[test]
+    fn ai_chat_max_iterations_round_trip_is_preserved() {
+        let mut settings = AppSettings::default();
+        settings.ai_chat.max_iterations = 128;
+
+        let json = serde_json::to_string(&settings).expect("应序列化 Agent 设置");
+        let restored: AppSettings = serde_json::from_str(&json).expect("应反序列化 Agent 设置");
+
+        assert_eq!(128, restored.ai_chat.max_iterations);
+    }
+
+    #[test]
+    fn ai_chat_max_iterations_are_clamped_when_deserialized() {
+        let below_minimum: AiChatSettings =
+            serde_json::from_value(serde_json::json!({"max_iterations": 0}))
+                .expect("应读取低于下限的 Agent 设置");
+        let above_maximum: AiChatSettings =
+            serde_json::from_value(serde_json::json!({"max_iterations": 999}))
+                .expect("应读取高于上限的 Agent 设置");
+
+        assert_eq!(
+            agent_runtime::MIN_AGENT_MAX_ITERATIONS,
+            below_minimum.max_iterations
+        );
+        assert_eq!(
+            agent_runtime::MAX_AGENT_MAX_ITERATIONS,
+            above_maximum.max_iterations
         );
     }
 

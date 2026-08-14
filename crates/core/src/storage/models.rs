@@ -296,15 +296,59 @@ impl StoredTerminalEncoding {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoredTerminalType {
+    #[default]
+    #[serde(rename = "xterm-256color")]
+    Xterm256Color,
+    #[serde(rename = "xterm")]
+    Xterm,
+}
+
+impl StoredTerminalType {
+    pub const fn all() -> &'static [Self] {
+        &[Self::Xterm256Color, Self::Xterm]
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xterm256Color => "xterm-256color",
+            Self::Xterm => "xterm",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        self.as_str()
+    }
+
+    fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshParams {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub auth_method: SshAuthMethod,
+    /// 不持久化用户名，每次建立连接前由用户输入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_username: Option<bool>,
+    /// 不持久化密码，每次建立连接前由用户输入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_password: Option<bool>,
+    /// 是否允许服务端发起 keyboard-interactive（常用于 OTP/2FA）认证。
+    ///
+    /// 旧连接没有该字段时保持历史行为：允许 keyboard-interactive。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard_interactive: Option<bool>,
     /// SSH 终端文本编码；旧连接缺少此字段时保持 UTF-8。
     #[serde(default, skip_serializing_if = "StoredTerminalEncoding::is_utf8")]
     pub terminal_encoding: StoredTerminalEncoding,
+    /// SSH PTY 终端类型；旧连接缺少此字段时保持 xterm-256color。
+    #[serde(default, skip_serializing_if = "StoredTerminalType::is_default")]
+    pub terminal_type: StoredTerminalType,
     /// 连接超时（秒）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connect_timeout: Option<u64>,
@@ -344,6 +388,30 @@ pub struct SshParams {
 }
 
 impl SshParams {
+    pub fn prompts_for_username(&self) -> bool {
+        self.prompt_username.unwrap_or(false)
+    }
+
+    pub fn prompts_for_password(&self) -> bool {
+        self.prompt_password.unwrap_or(false)
+    }
+
+    pub fn keyboard_interactive_enabled(&self) -> bool {
+        self.keyboard_interactive.unwrap_or(true)
+    }
+
+    /// 清除只应存在于当前连接尝试中的凭据，返回可安全持久化的参数。
+    pub fn sanitize_for_storage(&mut self) {
+        if self.prompts_for_username() {
+            self.username.clear();
+        }
+        if self.prompts_for_password()
+            && let SshAuthMethod::Password { password } = &mut self.auth_method
+        {
+            password.clear();
+        }
+    }
+
     /// 选择连接图标：手动指定优先，其次按探测到的操作系统 ID，未识别时默认 Linux 企鹅。
     pub fn os_icon(&self) -> IconName {
         ssh_os_icon(self.icon.as_deref().or(self.os_id.as_deref()))
@@ -1070,6 +1138,9 @@ pub struct Workspace {
     /// 手动排序位序，用于跨设备同步工作区列表顺序。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<i32>,
+    /// 本地侧栏中的折叠状态，不参与云同步。
+    #[serde(skip)]
+    pub sidebar_collapsed: bool,
 }
 
 impl Entity for Workspace {
@@ -1101,6 +1172,7 @@ impl Workspace {
             cloud_id: None,
             last_synced_at: None,
             sort_order: None,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -1354,7 +1426,8 @@ impl StoredConnection {
         }
     }
 
-    pub fn new_ssh(name: String, params: SshParams, workspace_id: Option<i64>) -> Self {
+    pub fn new_ssh(name: String, mut params: SshParams, workspace_id: Option<i64>) -> Self {
+        params.sanitize_for_storage();
         let name = default_ssh_name(name, &params);
         Self {
             id: None,
@@ -1451,7 +1524,9 @@ impl StoredConnection {
     }
 
     pub fn to_ssh_params(&self) -> Result<SshParams, serde_json::Error> {
-        serde_json::from_str(&self.params)
+        let mut params: SshParams = serde_json::from_str(&self.params)?;
+        params.sanitize_for_storage();
+        Ok(params)
     }
 
     pub fn to_remote_desktop_params(&self) -> Result<RemoteDesktopParams, serde_json::Error> {
@@ -1554,7 +1629,23 @@ impl StoredConnection {
     /// 对 params 中的敏感字段进行加密，返回加密后的 params 字符串。
     /// 敏感字段包括：password、passphrase、private_key、private_key_content 以及嵌套结构中的同类字段。
     pub fn encrypt_params(&self) -> String {
-        encrypt_json_passwords(&self.params)
+        encrypt_json_passwords(&self.params_for_storage())
+    }
+
+    /// 返回适合持久化、同步、分享或导出的参数 JSON。
+    ///
+    /// SSH 连接若配置为连接时输入用户名或密码，会在此处再次清除对应字段，
+    /// 防止绕过 `StoredConnection::new_ssh` 的调用路径意外泄漏临时凭据。
+    pub fn params_for_storage(&self) -> String {
+        if self.connection_type != ConnectionType::SshSftp {
+            return self.params.clone();
+        }
+
+        let Ok(mut params) = serde_json::from_str::<SshParams>(&self.params) else {
+            return self.params.clone();
+        };
+        params.sanitize_for_storage();
+        serde_json::to_string(&params).unwrap_or_else(|_| self.params.clone())
     }
 
     /// 对 params 中的加密字段进行解密，返回解密后的 params 字符串。
@@ -1583,7 +1674,11 @@ mod tests {
                 port: 2222,
                 username: "deploy".to_string(),
                 auth_method,
+                prompt_username: None,
+                prompt_password: None,
+                keyboard_interactive: None,
                 terminal_encoding: Default::default(),
+                terminal_type: Default::default(),
                 connect_timeout: Some(15),
                 keepalive_interval: Some(30),
                 keepalive_max: Some(3),
@@ -1762,7 +1857,11 @@ mod tests {
             port: 22,
             username: "root".to_string(),
             auth_method: SshAuthMethod::Agent,
+            prompt_username: None,
+            prompt_password: None,
+            keyboard_interactive: None,
             terminal_encoding: Default::default(),
+            terminal_type: Default::default(),
             connect_timeout: None,
             keepalive_interval: None,
             keepalive_max: None,
@@ -2632,7 +2731,11 @@ mod serial_tests {
             port: 22,
             username: "root".to_string(),
             auth_method: SshAuthMethod::Agent,
+            prompt_username: None,
+            prompt_password: None,
+            keyboard_interactive: None,
             terminal_encoding: Default::default(),
+            terminal_type: Default::default(),
             connect_timeout: None,
             keepalive_interval: None,
             keepalive_max: None,
@@ -2674,6 +2777,120 @@ mod serial_tests {
     }
 
     #[test]
+    fn ssh_params_credential_prompt_policy_is_backward_compatible() {
+        let mut params: SshParams = serde_json::from_str(
+            r#"{"host":"example.com","port":22,"username":"root","auth_method":{"Password":{"password":"secret"}}}"#,
+        )
+        .expect("旧连接缺少凭据策略字段时应可反序列化");
+        assert!(!params.prompts_for_username());
+        assert!(!params.prompts_for_password());
+        assert!(params.keyboard_interactive_enabled());
+
+        params.prompt_username = Some(true);
+        params.prompt_password = Some(false);
+        params.keyboard_interactive = Some(false);
+        let json = serde_json::to_string(&params).expect("SshParams 应可序列化");
+        assert!(json.contains("\"prompt_username\":true"));
+        assert!(json.contains("\"prompt_password\":false"));
+        assert!(json.contains("\"keyboard_interactive\":false"));
+
+        let parsed: SshParams = serde_json::from_str(&json).expect("SshParams 应可反序列化");
+        assert!(parsed.prompts_for_username());
+        assert!(!parsed.prompts_for_password());
+        assert!(!parsed.keyboard_interactive_enabled());
+    }
+
+    #[test]
+    fn stored_ssh_connection_clears_prompted_credentials() {
+        let params: SshParams = serde_json::from_value(serde_json::json!({
+            "host": "example.com",
+            "port": 22,
+            "username": "temporary-user",
+            "auth_method": {
+                "Password": {
+                    "password": "temporary-password"
+                }
+            },
+            "prompt_username": true,
+            "prompt_password": true,
+            "keyboard_interactive": true
+        }))
+        .expect("测试 SSH 参数应有效");
+
+        let connection = StoredConnection::new_ssh(String::new(), params, None);
+        assert_eq!(connection.name, "example.com:22");
+        assert!(!connection.params.contains("temporary-user"));
+        assert!(!connection.params.contains("temporary-password"));
+
+        let stored = connection.to_ssh_params().expect("持久化参数应可读取");
+        assert!(stored.username.is_empty());
+        assert!(matches!(
+            stored.auth_method,
+            SshAuthMethod::Password { ref password } if password.is_empty()
+        ));
+        assert!(stored.prompts_for_username());
+        assert!(stored.prompts_for_password());
+        assert!(stored.keyboard_interactive_enabled());
+    }
+
+    #[test]
+    fn ssh_storage_boundary_clears_prompted_credentials_from_raw_params() {
+        let mut connection = StoredConnection::new_ssh(
+            "example".to_string(),
+            SshParams {
+                host: "example.com".to_string(),
+                port: 22,
+                username: "stored-user".to_string(),
+                auth_method: SshAuthMethod::Agent,
+                prompt_username: None,
+                prompt_password: None,
+                keyboard_interactive: None,
+                terminal_encoding: Default::default(),
+                terminal_type: Default::default(),
+                connect_timeout: None,
+                keepalive_interval: None,
+                keepalive_max: None,
+                default_directory: None,
+                init_script: None,
+                disable_shell_integration: None,
+                x11_forwarding: None,
+                allow_legacy_algorithms: None,
+                jump_server: None,
+                proxy: None,
+                os_id: None,
+                icon: None,
+            },
+            None,
+        );
+        connection.params = serde_json::json!({
+            "host": "example.com",
+            "port": 22,
+            "username": "temporary-user",
+            "auth_method": {
+                "Password": {
+                    "password": "temporary-password"
+                }
+            },
+            "prompt_username": true,
+            "prompt_password": true
+        })
+        .to_string();
+
+        let sanitized = connection.params_for_storage();
+        assert!(!sanitized.contains("temporary-user"));
+        assert!(!sanitized.contains("temporary-password"));
+
+        let parsed = connection
+            .to_ssh_params()
+            .expect("读取 SSH 参数时也应清除临时凭据");
+        assert!(parsed.username.is_empty());
+        assert!(matches!(
+            parsed.auth_method,
+            SshAuthMethod::Password { ref password } if password.is_empty()
+        ));
+    }
+
+    #[test]
     fn ssh_terminal_encoding_round_trips_through_json() {
         let mut params: SshParams = serde_json::from_str(
             r#"{"host":"example.com","port":22,"username":"root","auth_method":"Agent"}"#,
@@ -2689,6 +2906,26 @@ mod serial_tests {
         assert_eq!(parsed.terminal_encoding, StoredTerminalEncoding::EucJp);
         assert!(StoredTerminalEncoding::all().contains(&StoredTerminalEncoding::EucJp));
         assert_eq!(StoredTerminalEncoding::EucJp.label(), "EUC-JP");
+    }
+
+    #[test]
+    fn ssh_terminal_type_defaults_and_round_trips_through_json() {
+        let mut params: SshParams = serde_json::from_str(
+            r#"{"host":"example.com","port":22,"username":"root","auth_method":"Agent"}"#,
+        )
+        .expect("旧连接缺少终端类型字段时应可反序列化");
+        assert_eq!(params.terminal_type, StoredTerminalType::Xterm256Color);
+
+        let default_json = serde_json::to_string(&params).expect("SshParams 应可序列化");
+        assert!(!default_json.contains("terminal_type"));
+
+        params.terminal_type = StoredTerminalType::Xterm;
+        let json = serde_json::to_string(&params).expect("SshParams 应可序列化");
+        assert!(json.contains("\"terminal_type\":\"xterm\""));
+
+        let parsed: SshParams = serde_json::from_str(&json).expect("SshParams 应可反序列化");
+        assert_eq!(parsed.terminal_type, StoredTerminalType::Xterm);
+        assert_eq!(StoredTerminalType::Xterm.as_str(), "xterm");
     }
 
     #[test]

@@ -14,8 +14,8 @@ use gpui_component::notification::Notification;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::{
-    ActiveTheme, BlinkCursor, Disableable, Icon, IconName, Selectable, Sizable, WindowExt, h_flex,
-    kbd::Kbd, v_flex,
+    ActiveTheme, BlinkCursor, Disableable, ElementExt, Icon, IconName, Selectable, Sizable,
+    WindowExt, h_flex, kbd::Kbd, v_flex,
 };
 use one_core::gpui_tokio::Tokio;
 use one_core::keybindings::{
@@ -28,7 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{
-    Arc, Mutex as StdMutex,
+    Arc, Mutex as StdMutex, Weak,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,7 +50,8 @@ use crate::addon::{
 use crate::broadcast_input::BroadcastClientId;
 use crate::broadcast_registry::{broadcast_input_registry, init_broadcast_input_registry};
 use crate::cd_completion::{
-    CdCompletionQuery, build_cd_completion_suggestions, parse_cd_completion_query,
+    CdCompletionCache, CdCompletionQuery, build_cd_completion_suggestions,
+    parse_cd_completion_query,
 };
 use crate::history_prompt::{HistoryPromptAccept, HistoryPromptMode, HistoryPromptState};
 use crate::host_key_dialog::{host_key_dialog_presentation, render_host_key_details_card};
@@ -105,13 +106,14 @@ use paste_safety::{has_trailing_line_continuation, has_unterminated_shell_quote}
 use remote_image_preview::image_from_local_path;
 use rust_i18n::t;
 use sftp::{RusshSftpClient, SftpClient};
+use ssh::SshSessionManager;
 use std::ops::Deref;
 use terminal::GpuiEventProxy;
 use terminal::LocalConfig;
 use terminal::terminal::{
     ConnectionState, HostKeyVerificationDecision, SshConnectionUpdate, Terminal,
     TerminalConnectionKind, TerminalModelEvent, TerminalScrollProxy, TerminalScrollSnapshot,
-    resolve_local_working_dir,
+    TerminalSshCredentialRequest, TerminalSshCredentials, resolve_local_working_dir,
 };
 use tokio::sync::Mutex;
 use workspace_explorer::{WorkspaceEditor, WorkspaceEditorEvent};
@@ -271,10 +273,13 @@ pub struct TerminalView {
     recording_playback_ticker: Option<Task<()>>,
     /// `cd` 目录补全的独立 SFTP 连接
     cd_completion_client: Option<Arc<Mutex<RusshSftpClient>>>,
+    /// 缓存所属的 SSH session；使用 Weak 避免延长旧连接生命周期。
+    cd_completion_session_manager: Option<Weak<SshSessionManager>>,
     /// 按父目录缓存远端子目录名，减少重复 SFTP 请求
-    cd_completion_cache: HashMap<String, Vec<String>>,
+    cd_completion_cache: CdCompletionCache,
     /// 当前正在加载目录候选的父目录
     cd_completion_loading_parent: Option<String>,
+    ssh_credential_inputs: Option<SshCredentialInputs>,
     ssh_mfa_inputs: Vec<SshMfaInput>,
     /// 当前已打开系统选择器的 ZMODEM 请求 ID，用于去重和拒绝过期结果。
     zmodem_picker_request_id: Option<u64>,

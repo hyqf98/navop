@@ -18,6 +18,62 @@ Common:
     en: Rename
     zh-CN: 重命名
     zh-HK: 重命名
+  copy:
+    en: Copy
+    zh-CN: 复制
+    zh-HK: 複製
+  cut:
+    en: Cut
+    zh-CN: 剪切
+    zh-HK: 剪下
+  paste:
+    en: Paste
+    zh-CN: 粘贴
+    zh-HK: 貼上
+  properties:
+    en: Properties
+    zh-CN: 属性
+    zh-HK: 屬性
+  calculate:
+    en: Calculate
+    zh-CN: 计算
+    zh-HK: 計算
+  calculating:
+    en: Calculating…
+    zh-CN: 计算中…
+    zh-HK: 計算中…
+  property_name:
+    en: Name
+    zh-CN: 名称
+    zh-HK: 名稱
+  property_path:
+    en: Path
+    zh-CN: 路径
+    zh-HK: 路徑
+  property_type:
+    en: Type
+    zh-CN: 类型
+    zh-HK: 類型
+  property_file:
+    en: File
+    zh-CN: 文件
+    zh-HK: 文件
+  property_folder:
+    en: Folder
+    zh-CN: 文件夹
+    zh-HK: 文件夾
+  property_size:
+    en: Size
+    zh-CN: 大小
+    zh-HK: 大小
+  property_modified:
+    en: Modified
+    zh-CN: 修改时间
+    zh-HK: 修改時間
+  property_permissions:
+    en: Permissions
+    zh-CN: 权限
+    zh-HK: 權限
   extract:
     en: Extract
     zh-CN: 解压
@@ -117,6 +173,14 @@ File:
     en: Kind
     zh-CN: 类型
     zh-HK: 類型
+  column_owner:
+    en: Owner
+    zh-CN: 拥有者
+    zh-HK: 擁有者
+  configure_columns:
+    en: Configure columns
+    zh-CN: 设置显示列
+    zh-HK: 設定顯示欄
   items_count:
     en: "%{count} items"
     zh-CN: "%{count} 个项目"
@@ -149,6 +213,78 @@ File:
     en: Drop files here
     zh-CN: 将文件拖放到这里
     zh-HK: 將檔案拖放到這裡
+  copy:
+    en: Copy
+    zh-CN: 复制
+    zh-HK: 複製
+  cut:
+    en: Cut
+    zh-CN: 剪切
+    zh-HK: 剪下
+  paste:
+    en: Paste
+    zh-CN: 粘贴
+    zh-HK: 貼上
+  properties:
+    en: Properties
+    zh-CN: 属性
+    zh-HK: 屬性
+  actions:
+    en: File actions
+    zh-CN: 文件操作
+    zh-HK: 文件操作
+  calculate:
+    en: Calculate
+    zh-CN: 计算
+    zh-HK: 計算
+  calculating:
+    en: Calculating…
+    zh-CN: 计算中…
+    zh-HK: 計算中…
+  property_name:
+    en: Name
+    zh-CN: 名称
+    zh-HK: 名稱
+  property_path:
+    en: Path
+    zh-CN: 路径
+    zh-HK: 路徑
+  property_type:
+    en: Type
+    zh-CN: 类型
+    zh-HK: 類型
+  property_file:
+    en: File
+    zh-CN: 文件
+    zh-HK: 文件
+  property_folder:
+    en: Folder
+    zh-CN: 文件夹
+    zh-HK: 文件夾
+  property_size:
+    en: Size
+    zh-CN: 大小
+    zh-HK: 大小
+  property_modified:
+    en: Modified
+    zh-CN: 修改时间
+    zh-HK: 修改時間
+  property_permissions:
+    en: Permissions
+    zh-CN: 权限
+    zh-HK: 權限
+  property_owner:
+    en: Owner
+    zh-CN: 拥有者
+    zh-HK: 擁有者
+  copy_ready:
+    en: Files copied. Choose a destination and paste.
+    zh-CN: 已复制文件，请选择目标位置后粘贴
+    zh-HK: 已複製文件，請選擇目標位置後貼上
+  cut_ready:
+    en: Files cut. Choose a destination and paste.
+    zh-CN: 已剪切文件，请选择目标位置后粘贴
+    zh-HK: 已剪下文件，請選擇目標位置後貼上
   new_file:
     en: New File
     zh-CN: 新建文件
@@ -261,6 +397,10 @@ Conflict:
     en: "The following files already exist at destination:"
     zh-CN: "以下文件在目标位置已存在："
     zh-HK: "以下文件在目標位置已存在："
+  server_copy_type_mismatch_safe:
+    en: "For safety, a file and a directory cannot replace each other during server-to-server copy. Choose Keep Both or Skip."
+    zh-CN: "为避免误删目录或文件，服务器间复制不允许文件与目录互相覆盖。请选择“保留两者”或“跳过”。"
+    zh-HK: "為避免誤刪目錄或檔案，伺服器間複製不允許檔案與目錄互相覆蓋。請選擇「保留兩者」或「跳過」。"
   choose_action:
     en: "Choose how to proceed:"
     zh-CN: "请选择处理方式："
@@ -424,6 +564,18 @@ FavoritePath:
 
 # 提示信息
 Notification:
+  clipboard_copied:
+    en: Files copied. Choose a destination and paste.
+    zh-CN: 已复制文件，请选择目标位置后粘贴
+    zh-HK: 已複製文件，請選擇目標位置後貼上
+  clipboard_cut:
+    en: Files cut. Choose a destination and paste.
+    zh-CN: 已剪切文件，请选择目标位置后粘贴
+    zh-HK: 已剪下文件，請選擇目標位置後貼上
+  paste_success:
+    en: Paste completed
+    zh-CN: 粘贴完成
+    zh-HK: 貼上完成
   clipboard_upload_not_connected:
     en: SFTP is not connected, so clipboard content cannot be uploaded
     zh-CN: SFTP 未连接，无法上传剪贴板内容
@@ -463,6 +615,26 @@ Notification:
 
 # 错误信息
 Error:
+  clipboard_empty:
+    en: No files have been copied or cut
+    zh-CN: 尚未复制或剪切文件
+    zh-HK: 尚未複製或剪下文件
+  incompatible_paste_endpoint:
+    en: Pasting between different endpoints is not supported
+    zh-CN: 暂不支持在不同端点之间粘贴
+    zh-HK: 暫不支持在不同端點之間貼上
+  invalid_paste_target:
+    en: A folder cannot be pasted into itself or one of its descendants
+    zh-CN: 文件夹不能粘贴到自身或其子目录
+    zh-HK: 文件夾不能貼上到自身或其子目錄
+  paste_failed:
+    en: "Paste failed: %{error}"
+    zh-CN: "粘贴失败：%{error}"
+    zh-HK: "貼上失敗：%{error}"
+  calculate_size_failed:
+    en: "Failed to calculate folder size: %{error}"
+    zh-CN: "计算文件夹大小失败：%{error}"
+    zh-HK: "計算文件夾大小失敗：%{error}"
   sftp_not_connected:
     en: SFTP client is not connected
     zh-CN: SFTP 客户端未连接
@@ -533,6 +705,14 @@ FilePicker:
 
 # 传输相关
 Transfer:
+  transfer_to_left:
+    en: Transfer to left server
+    zh-CN: 传输到左侧服务器
+    zh-HK: 傳輸到左側伺服器
+  transfer_to_right:
+    en: Transfer to right server
+    zh-CN: 传输到右侧服务器
+    zh-HK: 傳輸到右側伺服器
   has_active_tasks:
     en: "There are %{count} file operation(s) in progress (upload/download/delete)."
     zh-CN: "有 %{count} 个文件操作正在进行中（上传/下载/删除）。"
@@ -561,3 +741,118 @@ Transfer:
     en: "Server copy (%{count} items)"
     zh-CN: "服务器间复制（%{count} 个项目）"
     zh-HK: "伺服器間複製（%{count} 個項目）"
+  direct_copy_title:
+    en: Configure direct server transfer
+    zh-CN: 配置服务器间直接传输
+    zh-HK: 設定伺服器間直接傳輸
+  direct_copy_intro:
+    en: "Navop can configure direct server transfer for %{count} item(s)."
+    zh-CN: "Navop 可为 %{count} 个项目配置服务器间直接传输。"
+    zh-HK: "Navop 可為 %{count} 個項目設定伺服器間直接傳輸。"
+  direct_copy_route:
+    en: "Transfer route:"
+    zh-CN: "传输路径："
+    zh-HK: "傳輸路徑："
+  direct_copy_item_count:
+    en: "%{count} top-level item(s) will be copied."
+    zh-CN: "将复制 %{count} 个顶层项目。"
+    zh-HK: "將複製 %{count} 個頂層項目。"
+  direct_copy_server_auth_heading:
+    en: "Automatically configure direct transfer (%{strategy})"
+    zh-CN: "自动配置直接传输（%{strategy}）"
+    zh-HK: "自動設定直接傳輸（%{strategy}）"
+  direct_copy_auth_boundary:
+    en: "Navop creates a dedicated passwordless SSH key on the source server and adds its public key to the target server. Files then transfer directly between the servers without passing through this computer."
+    zh-CN: "Navop 会在源服务器创建专用的无口令 SSH 密钥，并将公钥添加到目标服务器。配置后，文件将直接在两台服务器之间传输，不经过本机。"
+    zh-HK: "Navop 會在來源伺服器建立專用的無密碼 SSH 金鑰，並將公鑰新增至目標伺服器。設定後，檔案將直接在兩台伺服器之間傳輸，不經過本機。"
+  direct_copy_security:
+    en: "The private key stays on the source server. Navop never sends the target server's password or private key to the source server."
+    zh-CN: "私钥仅保留在源服务器；Navop 不会向源服务器发送目标服务器的密码或私钥。"
+    zh-HK: "私鑰只保留在來源伺服器；Navop 不會向來源伺服器傳送目標伺服器的密碼或私鑰。"
+  direct_copy_use_direct:
+    en: Configure and transfer directly
+    zh-CN: 自动配置并直接传输
+    zh-HK: 自動設定並直接傳輸
+  direct_copy_authenticating:
+    en: Automatically configuring and verifying the source-to-target connection
+    zh-CN: 正在自动配置并验证源服务器到目标服务器的连接
+    zh-HK: 正在自動設定並驗證來源伺服器到目標伺服器的連線
+  relay_copy_starting:
+    en: Starting transfer through Navop
+    zh-CN: 正在启动 Navop 中转
+    zh-HK: 正在啟動 Navop 中轉
+  direct_copy_use_relay:
+    en: Relay through Navop
+    zh-CN: 通过 Navop 中转
+    zh-HK: 透過 Navop 中轉
+  direct_copy_cancel:
+    en: Cancel
+    zh-CN: 取消
+    zh-HK: 取消
+  strategy_rsync:
+    en: rsync
+    zh-CN: rsync
+    zh-HK: rsync
+  strategy_scp:
+    en: scp
+    zh-CN: scp
+    zh-HK: scp
+
+# SSH 主机密钥确认
+HostKey:
+  title:
+    en: Verify SSH Host Key
+    zh-CN: 验证 SSH 主机指纹
+    zh-HK: 驗證 SSH 主機指紋
+  message:
+    en: This server is not yet trusted. Verify the fingerprint before continuing.
+    zh-CN: 尚未信任此服务器。继续前请核对主机指纹。
+    zh-HK: 尚未信任此伺服器。繼續前請核對主機指紋。
+  changed_title:
+    en: SSH Host Key Changed
+    zh-CN: SSH 主机指纹已变更
+    zh-HK: SSH 主機指紋已變更
+  changed_message:
+    en: The server presented a different host key. This can happen after reinstalling the server or rotating its keys, but it may also indicate a man-in-the-middle attack. Verify the new fingerprint through a trusted channel before continuing.
+    zh-CN: 服务器提供了与之前不同的主机指纹。这可能由系统重装或密钥轮换引起，也可能意味着遭到中间人攻击。继续前请通过可信渠道核对新指纹。
+    zh-HK: 伺服器提供了與之前不同的主機指紋。這可能由系統重裝或金鑰輪換引起，也可能表示遭到中間人攻擊。繼續前請透過可信渠道核對新指紋。
+  identity:
+    en: Server
+    zh-CN: 服务器
+    zh-HK: 伺服器
+  presented:
+    en: New Host Key
+    zh-CN: 新主机指纹
+    zh-HK: 新主機指紋
+  expected:
+    en: Previously Trusted Host Keys
+    zh-CN: 之前信任的主机指纹
+    zh-HK: 之前信任的主機指紋
+  algorithm:
+    en: Algorithm
+    zh-CN: 算法
+    zh-HK: 演算法
+  fingerprint:
+    en: SHA-256 Fingerprint
+    zh-CN: SHA-256 指纹
+    zh-HK: SHA-256 指紋
+  accept_save:
+    en: Accept and Save
+    zh-CN: 接受并保存
+    zh-HK: 接受並儲存
+  update_save:
+    en: Update and Save
+    zh-CN: 更新并保存
+    zh-HK: 更新並儲存
+  accept_once:
+    en: Accept Once
+    zh-CN: 仅本次接受
+    zh-HK: 僅本次接受
+  reject:
+    en: Reject
+    zh-CN: 拒绝
+    zh-HK: 拒絕
+  rejected:
+    en: SSH host key was rejected.
+    zh-CN: 已拒绝 SSH 主机指纹。
+    zh-HK: 已拒絕 SSH 主機指紋。

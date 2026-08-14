@@ -67,7 +67,11 @@ fn build_ssh(input: &Value) -> Result<StoredConnection, ToolError> {
         auth_method: password.map_or(SshAuthMethod::AutoPublicKey, |password| {
             SshAuthMethod::Password { password }
         }),
+        prompt_username: None,
+        prompt_password: None,
+        keyboard_interactive: None,
         terminal_encoding: Default::default(),
+        terminal_type: Default::default(),
         connect_timeout: optional_u64(values, "connect_timeout"),
         keepalive_interval: None,
         keepalive_max: None,

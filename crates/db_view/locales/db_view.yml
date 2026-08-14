@@ -1119,6 +1119,26 @@ Procedure:
 
 # 查询操作
 Query:
+  select_connection:
+    en: Select connection...
+    zh-CN: 选择连接...
+    zh-HK: 選擇連線...
+  search_connection:
+    en: Search connections...
+    zh-CN: 搜索连接...
+    zh-HK: 搜尋連線...
+  connection_switch_during_execution:
+    en: Wait for the current query to finish before switching connections
+    zh-CN: 请等待当前查询执行完成后再切换连接
+    zh-HK: 請等待目前查詢執行完成後再切換連線
+  transaction_finish_before_switch_connection:
+    en: Commit or roll back the current transaction before switching connections
+    zh-CN: 请先提交或回滚当前事务，再切换连接
+    zh-HK: 請先提交或回滾目前交易，再切換連線
+  connection_unavailable:
+    en: The selected connection is unavailable
+    zh-CN: 所选连接当前不可用
+    zh-HK: 所選連線目前不可用
   compress:
     en: Compress
     zh-CN: 压缩
@@ -1227,6 +1247,22 @@ Query:
     en: Query Name
     zh-CN: 查询名称
     zh-HK: 查詢名稱
+  query_name_empty:
+    en: Query name cannot be empty
+    zh-CN: 查询名称不能为空
+    zh-HK: 查詢名稱不能為空
+  query_name_exists:
+    en: A query with this name already exists
+    zh-CN: 已存在同名查询
+    zh-HK: 已存在同名查詢
+  query_name_invalid:
+    en: Query name is not a valid file name
+    zh-CN: 查询名称不是有效的文件名
+    zh-HK: 查詢名稱不是有效的檔案名稱
+  query_save_failed:
+    en: "Failed to save query: %{error}"
+    zh-CN: "保存查询失败：%{error}"
+    zh-HK: "儲存查詢失敗：%{error}"
   query_saved:
     en: Query saved successfully
     zh-CN: 查询保存成功
@@ -1247,6 +1283,10 @@ Query:
     en: Running...
     zh-CN: 运行中...
     zh-HK: 執行中...
+  stop:
+    en: Stop
+    zh-CN: 停止
+    zh-HK: 停止
   run_selected:
     en: Run Selected
     zh-CN: 运行选中
@@ -1263,6 +1303,18 @@ Query:
     en: Save
     zh-CN: 保存
     zh-HK: 儲存
+  save_query_title:
+    en: Save Query
+    zh-CN: 保存查询
+    zh-HK: 儲存查詢
+  enter_query_name:
+    en: Enter a query name
+    zh-CN: 请输入查询名称
+    zh-HK: 請輸入查詢名稱
+  dont_save:
+    en: Don't Save
+    zh-CN: 不保存
+    zh-HK: 不儲存
   select_database:
     en: Select database...
     zh-CN: 选择数据库...

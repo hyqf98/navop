@@ -1,29 +1,154 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, ListSizingBehavior,
-    MouseButton, MouseDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window,
-    div, prelude::*, px, uniform_list,
+    Anchor, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement,
+    ListSizingBehavior, MouseButton, MouseDownEvent, ParentElement, Render, Styled,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, ContentState, Icon, IconName, IconSize, InteractiveElementExt, Sizable, h_flex,
+    ActiveTheme, ContentState, Icon, IconName, IconSize, InteractiveElementExt, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     scroll::ScrollableElement,
     tooltip::Tooltip,
     v_flex,
 };
 use remote_file_editor::{external_editor_menu_label, external_editors_for_file};
 use rust_i18n::t;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::time::SystemTime;
 
 use crate::endpoint::DragSource;
+use crate::file_list_preferences::{
+    FileListPreferenceScope, load_hidden_columns, save_hidden_columns,
+};
 
 const FILE_ROW_HEIGHT: gpui::Pixels = px(44.);
 const NAME_COLUMN_WIDTH: gpui::Pixels = px(250.);
 const MODIFIED_COLUMN_WIDTH: gpui::Pixels = px(180.);
 const SIZE_COLUMN_WIDTH: gpui::Pixels = px(100.);
 const KIND_COLUMN_WIDTH: gpui::Pixels = px(80.);
+const OWNER_COLUMN_WIDTH: gpui::Pixels = px(120.);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileColumn {
+    Name,
+    Modified,
+    Size,
+    Kind,
+    Owner,
+}
+
+impl FileColumn {
+    const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Modified,
+        Self::Size,
+        Self::Kind,
+        Self::Owner,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Modified => "modified",
+            Self::Size => "size",
+            Self::Kind => "kind",
+            Self::Owner => "owner",
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Name => t!("File.column_name").to_string(),
+            Self::Modified => t!("File.column_modified").to_string(),
+            Self::Size => t!("File.column_size").to_string(),
+            Self::Kind => t!("File.column_kind").to_string(),
+            Self::Owner => t!("File.column_owner").to_string(),
+        }
+    }
+
+    fn width(self) -> gpui::Pixels {
+        match self {
+            Self::Name => NAME_COLUMN_WIDTH,
+            Self::Modified => MODIFIED_COLUMN_WIDTH,
+            Self::Size => SIZE_COLUMN_WIDTH,
+            Self::Kind => KIND_COLUMN_WIDTH,
+            Self::Owner => OWNER_COLUMN_WIDTH,
+        }
+    }
+
+    fn sort_column(self) -> SortColumn {
+        match self {
+            Self::Name => SortColumn::Name,
+            Self::Modified => SortColumn::Modified,
+            Self::Size => SortColumn::Size,
+            Self::Kind => SortColumn::Kind,
+            Self::Owner => SortColumn::Owner,
+        }
+    }
+
+    fn can_hide(self) -> bool {
+        self != Self::Name
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileContextMenuCapabilities {
+    is_remote: bool,
+    supports_entry_mutation: bool,
+    supports_remote_editing: bool,
+    supports_favorite: bool,
+    supports_delete: bool,
+    supports_upload_picker: bool,
+}
+
+fn file_context_menu_capabilities(source: DragSource) -> FileContextMenuCapabilities {
+    match source {
+        DragSource::LocalLeft => FileContextMenuCapabilities {
+            is_remote: false,
+            supports_entry_mutation: true,
+            supports_remote_editing: false,
+            supports_favorite: true,
+            supports_delete: true,
+            supports_upload_picker: true,
+        },
+        DragSource::RemoteLeft => FileContextMenuCapabilities {
+            is_remote: true,
+            supports_entry_mutation: false,
+            supports_remote_editing: false,
+            supports_favorite: false,
+            supports_delete: false,
+            supports_upload_picker: false,
+        },
+        DragSource::RemoteRight => FileContextMenuCapabilities {
+            is_remote: true,
+            supports_entry_mutation: true,
+            supports_remote_editing: true,
+            supports_favorite: true,
+            supports_delete: true,
+            supports_upload_picker: true,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferMenuAction {
+    Upload,
+    Download,
+    TransferToLeft,
+    TransferToRight,
+}
+
+fn transfer_menu_action(source: DragSource, opposite_is_remote: bool) -> TransferMenuAction {
+    match source {
+        DragSource::LocalLeft => TransferMenuAction::Upload,
+        DragSource::RemoteLeft => TransferMenuAction::TransferToRight,
+        DragSource::RemoteRight if opposite_is_remote => TransferMenuAction::TransferToLeft,
+        DragSource::RemoteRight => TransferMenuAction::Download,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct FileItem {
@@ -32,6 +157,16 @@ pub struct FileItem {
     pub modified: SystemTime,
     pub is_dir: bool,
     pub permissions: String,
+    pub owner: Option<String>,
+    pub directory_size: DirectorySizeState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DirectorySizeState {
+    #[default]
+    Unknown,
+    Calculating,
+    Ready(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -40,6 +175,7 @@ pub enum SortColumn {
     Modified,
     Size,
     Kind,
+    Owner,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,9 +184,9 @@ pub enum SortOrder {
     Descending,
 }
 
-fn format_file_size(size: u64) -> String {
+pub(crate) fn format_file_size(size: u64) -> String {
     if size == 0 {
-        return "- -".to_string();
+        return "0 B".to_string();
     }
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -63,7 +199,31 @@ fn format_file_size(size: u64) -> String {
     } else if size >= KB {
         format!("{:.2} kB", size as f64 / KB as f64)
     } else {
-        format!("{} Bytes", size)
+        format!("{} B", size)
+    }
+}
+
+fn size_sort_key(item: &FileItem) -> (u8, u64) {
+    if !item.is_dir {
+        return (0, item.size);
+    }
+
+    match item.directory_size {
+        DirectorySizeState::Ready(size) => (0, size),
+        DirectorySizeState::Calculating => (1, 0),
+        DirectorySizeState::Unknown => (2, 0),
+    }
+}
+
+fn size_label(item: &FileItem) -> String {
+    if !item.is_dir {
+        return format_file_size(item.size);
+    }
+
+    match item.directory_size {
+        DirectorySizeState::Unknown => t!("File.calculate").to_string(),
+        DirectorySizeState::Calculating => t!("File.calculating").to_string(),
+        DirectorySizeState::Ready(size) => format_file_size(size),
     }
 }
 
@@ -164,6 +324,7 @@ pub struct FileListPanel {
     current_path: String,
     is_remote: bool,
     drag_source: DragSource,
+    opposite_is_remote: bool,
 
     items: Vec<FileItem>,
     filtered_indices: Vec<usize>,
@@ -171,6 +332,8 @@ pub struct FileListPanel {
     selection_anchor_index: Option<usize>,
     sort_column: SortColumn,
     sort_order: SortOrder,
+    column_preference_scope: FileListPreferenceScope,
+    hidden_columns: BTreeSet<String>,
 
     show_hidden: bool,
     search_query: String,
@@ -197,6 +360,12 @@ impl FileListPanel {
         let search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("Placeholder.search").to_string())
         });
+        let column_preference_scope = if is_remote {
+            FileListPreferenceScope::Right
+        } else {
+            FileListPreferenceScope::Left
+        };
+        let hidden_columns = load_hidden_columns(column_preference_scope);
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(
@@ -229,12 +398,15 @@ impl FileListPanel {
             } else {
                 DragSource::LocalLeft
             },
+            opposite_is_remote: false,
             items: Vec::new(),
             filtered_indices: Vec::new(),
             selected_indices: HashSet::new(),
             selection_anchor_index: None,
             sort_column: SortColumn::Name,
             sort_order: SortOrder::Ascending,
+            column_preference_scope,
+            hidden_columns,
             show_hidden: false,
             search_query: String::new(),
             search_input,
@@ -257,12 +429,56 @@ impl FileListPanel {
         cx.notify();
     }
 
+    pub fn set_opposite_endpoint_remote(&mut self, is_remote: bool, cx: &mut Context<Self>) {
+        if self.opposite_is_remote == is_remote {
+            return;
+        }
+        self.opposite_is_remote = is_remote;
+        cx.notify();
+    }
+
     pub fn set_items(&mut self, items: Vec<FileItem>, cx: &mut Context<Self>) {
         self.items = items;
         self.clear_selection();
         self.sort_items();
         self.apply_filter();
         cx.notify();
+    }
+
+    pub fn set_directory_size_state(
+        &mut self,
+        full_path: &str,
+        state: DirectorySizeState,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let is_remote = self.is_remote;
+        let current_path = self.current_path.clone();
+        let Some(item) = self.items.iter_mut().find(|item| {
+            let item_path = if is_remote {
+                if current_path.ends_with('/') {
+                    format!("{}{}", current_path, item.name)
+                } else {
+                    format!("{}/{}", current_path, item.name)
+                }
+            } else {
+                std::path::Path::new(&current_path)
+                    .join(&item.name)
+                    .to_string_lossy()
+                    .to_string()
+            };
+            item.is_dir && item_path == full_path
+        }) else {
+            return false;
+        };
+
+        item.directory_size = state;
+        if self.sort_column == SortColumn::Size {
+            self.sort_items();
+            self.apply_filter();
+            self.clear_selection();
+        }
+        cx.notify();
+        true
     }
 
     pub fn set_path(&mut self, path: String, _window: &mut Window, cx: &mut Context<Self>) {
@@ -431,6 +647,26 @@ impl FileListPanel {
         cx.notify();
     }
 
+    fn is_column_visible(&self, column: FileColumn) -> bool {
+        !column.can_hide() || !self.hidden_columns.contains(column.key())
+    }
+
+    fn toggle_column(&mut self, column: FileColumn, cx: &mut Context<Self>) {
+        if !column.can_hide() {
+            return;
+        }
+
+        if !self.hidden_columns.remove(column.key()) {
+            self.hidden_columns.insert(column.key().to_string());
+        }
+
+        if let Err(error) = save_hidden_columns(self.column_preference_scope, &self.hidden_columns)
+        {
+            tracing::warn!("Failed to save SFTP file-list column settings: {error:#}");
+        }
+        cx.notify();
+    }
+
     fn sort_items(&mut self) {
         let sort_column = self.sort_column;
         let sort_order = self.sort_order;
@@ -447,8 +683,14 @@ impl FileListPanel {
             let cmp = match sort_column {
                 SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortColumn::Modified => a.modified.cmp(&b.modified),
-                SortColumn::Size => a.size.cmp(&b.size),
+                SortColumn::Size => size_sort_key(a).cmp(&size_sort_key(b)),
                 SortColumn::Kind => get_file_kind(&a.name).cmp(&get_file_kind(&b.name)),
+                SortColumn::Owner => a
+                    .owner
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .cmp(&b.owner.as_deref().unwrap_or_default().to_lowercase()),
             };
 
             match sort_order {
@@ -498,66 +740,71 @@ impl FileListPanel {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sort_column = self.sort_column;
         let sort_order = self.sort_order;
-        let name = t!("File.column_name").to_string();
-        let modified = t!("File.column_modified").to_string();
-        let size = t!("File.column_size").to_string();
-        let kind = t!("File.column_kind").to_string();
+        let view = cx.entity();
+        let hidden_columns = self.hidden_columns.clone();
+        let menu_id = match self.column_preference_scope {
+            FileListPreferenceScope::Left => "left-file-list-columns",
+            FileListPreferenceScope::Right => "right-file-list-columns",
+        };
 
-        h_flex()
+        let mut header = h_flex()
             .h(cx.theme().geometry.layout.list_header)
-            .px_3()
+            .px_2()
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
-            .child(self.render_header_cell(
-                &name,
-                SortColumn::Name,
-                NAME_COLUMN_WIDTH,
-                sort_column,
-                sort_order,
-                cx,
-            ))
-            .child(self.render_header_cell(
-                &modified,
-                SortColumn::Modified,
-                MODIFIED_COLUMN_WIDTH,
-                sort_column,
-                sort_order,
-                cx,
-            ))
-            .child(self.render_header_cell(
-                &size,
-                SortColumn::Size,
-                SIZE_COLUMN_WIDTH,
-                sort_column,
-                sort_order,
-                cx,
-            ))
-            .child(self.render_header_cell(
-                &kind,
-                SortColumn::Kind,
-                KIND_COLUMN_WIDTH,
-                sort_column,
-                sort_order,
-                cx,
-            ))
+            .bg(cx.theme().title_bar);
+
+        for column in FileColumn::ALL {
+            if self.is_column_visible(column) {
+                header = header.child(self.render_header_cell(column, sort_column, sort_order, cx));
+            }
+        }
+
+        header.child(
+            div().ml_auto().child(
+                Button::new(menu_id)
+                    .ghost()
+                    .small()
+                    .compact()
+                    .icon(IconName::Settings)
+                    .tooltip(t!("File.configure_columns"))
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, window, _cx| {
+                        for column in FileColumn::ALL {
+                            let checked =
+                                !column.can_hide() || !hidden_columns.contains(column.key());
+                            let column_view = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(column.label())
+                                    .checked(checked)
+                                    .disabled(!column.can_hide())
+                                    .on_click(window.listener_for(
+                                        &column_view,
+                                        move |this, _, _, cx| {
+                                            this.toggle_column(column, cx);
+                                        },
+                                    )),
+                            );
+                        }
+                        menu
+                    }),
+            ),
+        )
     }
 
     fn render_header_cell(
         &self,
-        label: &str,
-        column: SortColumn,
-        width: gpui::Pixels,
+        column: FileColumn,
         current_sort: SortColumn,
         sort_order: SortOrder,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_sorted = current_sort == column;
-        let label = label.to_string();
+        let sort_column = column.sort_column();
+        let is_sorted = current_sort == sort_column;
+        let label = column.label();
 
         h_flex()
-            .w(width)
+            .w(column.width())
             .h_full()
             .px_2()
             .items_center()
@@ -567,7 +814,7 @@ impl FileListPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
-                    this.set_sort(column, cx);
+                    this.set_sort(sort_column, cx);
                 }),
             )
             .child(
@@ -593,111 +840,146 @@ impl FileListPanel {
         &self,
         ix: usize,
         item: &FileItem,
+        full_path: &str,
         is_selected: bool,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = item.name.clone();
         let display_name = display_file_name(&name);
         let is_dir = item.is_dir;
-        let size = item.size;
         let modified = item.modified;
+        let directory_size = item.directory_size;
+        let size_path = full_path.to_string();
+        let owner = item.owner.clone().unwrap_or_else(|| "-".to_string());
 
         h_flex()
             .h(FILE_ROW_HEIGHT)
             .px_2()
             .items_center()
             .when(is_selected, |el| el.bg(cx.theme().selection))
-            .child(
-                h_flex()
-                    .w(NAME_COLUMN_WIDTH)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Icon::new(if is_dir {
-                            IconName::Folder1
-                        } else {
-                            IconName::File
-                        })
-                        .color()
-                        .with_size(IconSize::Large),
-                    )
-                    .child({
-                        let tooltip_name = display_name.clone();
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .id(("file-name", ix))
-                                    .text_base()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(display_name.clone())
-                                    .tooltip(move |window, cx| {
-                                        Tooltip::new(tooltip_name.clone()).build(window, cx)
-                                    }),
-                            )
-                            .when(!item.permissions.is_empty(), |el| {
-                                el.child(
+            .when(self.is_column_visible(FileColumn::Name), |row| {
+                row.child(
+                    h_flex()
+                        .w(NAME_COLUMN_WIDTH)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Icon::new(if is_dir {
+                                IconName::Folder1
+                            } else {
+                                IconName::File
+                            })
+                            .color()
+                            .with_size(IconSize::Large),
+                        )
+                        .child({
+                            let tooltip_name = display_name.clone();
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(
                                     div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
+                                        .id(("file-name", ix))
+                                        .text_base()
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
-                                        .child(item.permissions.clone()),
+                                        .child(display_name.clone())
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tooltip_name.clone()).build(window, cx)
+                                        }),
                                 )
-                            })
-                    }),
-            )
-            .child(
-                div()
-                    .w(MODIFIED_COLUMN_WIDTH)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .px_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(format_modified_time(modified)),
-            )
-            .child(
-                div()
-                    .w(SIZE_COLUMN_WIDTH)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .px_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(if is_dir {
-                        "- -".to_string()
-                    } else {
-                        format_file_size(size)
-                    }),
-            )
-            .child(
-                div()
-                    .w(KIND_COLUMN_WIDTH)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .px_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(if is_dir {
-                        "folder".to_string()
-                    } else {
-                        get_file_kind(&name)
-                    }),
-            )
+                                .when(!item.permissions.is_empty(), |el| {
+                                    el.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(item.permissions.clone()),
+                                    )
+                                })
+                        }),
+                )
+            })
+            .when(self.is_column_visible(FileColumn::Modified), |row| {
+                row.child(
+                    div()
+                        .w(MODIFIED_COLUMN_WIDTH)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(format_modified_time(modified)),
+                )
+            })
+            .when(self.is_column_visible(FileColumn::Size), |row| {
+                row.child(
+                    div()
+                        .id(("file-size", ix))
+                        .w(SIZE_COLUMN_WIDTH)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when(
+                            is_dir && directory_size == DirectorySizeState::Unknown,
+                            |el| {
+                                el.cursor_pointer().text_color(cx.theme().link).on_click(
+                                    cx.listener(move |_this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(FileListPanelEvent::CalculateSize {
+                                            full_path: size_path.clone(),
+                                        });
+                                    }),
+                                )
+                            },
+                        )
+                        .child(size_label(item)),
+                )
+            })
+            .when(self.is_column_visible(FileColumn::Kind), |row| {
+                row.child(
+                    div()
+                        .w(KIND_COLUMN_WIDTH)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(if is_dir {
+                            "folder".to_string()
+                        } else {
+                            get_file_kind(&name)
+                        }),
+                )
+            })
+            .when(self.is_column_visible(FileColumn::Owner), |row| {
+                row.child(
+                    div()
+                        .w(OWNER_COLUMN_WIDTH)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(owner),
+                )
+            })
     }
 
     fn render_parent_row(&self, _cx: &App) -> impl IntoElement {
@@ -705,21 +987,32 @@ impl FileListPanel {
             .h(FILE_ROW_HEIGHT)
             .px_2()
             .items_center()
-            .child(
-                h_flex()
-                    .w(NAME_COLUMN_WIDTH)
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Icon::new(IconName::Folder1)
-                            .color()
-                            .with_size(IconSize::Large),
-                    )
-                    .child(div().text_base().child("..")),
-            )
-            .child(div().w(MODIFIED_COLUMN_WIDTH).px_2())
-            .child(div().w(SIZE_COLUMN_WIDTH).px_2())
-            .child(div().w(KIND_COLUMN_WIDTH).px_2())
+            .when(self.is_column_visible(FileColumn::Name), |row| {
+                row.child(
+                    h_flex()
+                        .w(NAME_COLUMN_WIDTH)
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::Folder1)
+                                .color()
+                                .with_size(IconSize::Large),
+                        )
+                        .child(div().text_base().child("..")),
+                )
+            })
+            .when(self.is_column_visible(FileColumn::Modified), |row| {
+                row.child(div().w(MODIFIED_COLUMN_WIDTH).px_2())
+            })
+            .when(self.is_column_visible(FileColumn::Size), |row| {
+                row.child(div().w(SIZE_COLUMN_WIDTH).px_2())
+            })
+            .when(self.is_column_visible(FileColumn::Kind), |row| {
+                row.child(div().w(KIND_COLUMN_WIDTH).px_2())
+            })
+            .when(self.is_column_visible(FileColumn::Owner), |row| {
+                row.child(div().w(OWNER_COLUMN_WIDTH).px_2())
+            })
     }
 
     fn render_parent_navigation_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -764,18 +1057,21 @@ impl FileListPanel {
     }
 
     /// 构建文件项的右键菜单
-    /// 根据 is_remote（远程/本地）和 is_dir（文件夹/文件）显示不同的菜单项
+    /// 根据文件面板端点和项目类型显示该端点真正支持的菜单项。
     fn build_file_context_menu(
         menu: PopupMenu,
         filtered_ix: usize,
         name: &str,
         full_path: &str,
         is_dir: bool,
-        is_remote: bool,
+        source: DragSource,
+        opposite_is_remote: bool,
         view: &Entity<Self>,
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
+        let capabilities = file_context_menu_capabilities(source);
+        let is_remote = capabilities.is_remote;
         let name_for_rename = name.to_string();
         let path_for_rename = full_path.to_string();
         let name_for_download = name.to_string();
@@ -793,13 +1089,58 @@ impl FileListPanel {
         let path_for_delete = full_path.to_string();
         let path_for_upload_file = full_path.to_string();
         let path_for_upload_folder = full_path.to_string();
+        let target_dir_for_paste = if is_dir {
+            full_path.to_string()
+        } else {
+            view.read(cx).current_path.clone()
+        };
+        let item_for_properties = view
+            .read(cx)
+            .filtered_indices
+            .get(filtered_ix)
+            .and_then(|&real_ix| view.read(cx).items.get(real_ix))
+            .cloned();
 
         let view_ref = view.clone();
 
         let mut menu = menu;
 
-        // 文件夹专属操作：新建文件、新建文件夹
-        if is_dir {
+        let view_copy_entries = view_ref.clone();
+        let view_cut_entries = view_ref.clone();
+        let view_paste = view_ref.clone();
+        menu = menu
+            .item(
+                PopupMenuItem::new(t!("File.copy").to_string())
+                    .icon(IconName::Copy)
+                    .on_click(
+                        window.listener_for(&view_copy_entries, move |this, _, _, cx| {
+                            this.select_context_target(filtered_ix, cx);
+                            cx.emit(FileListPanelEvent::CopyEntries);
+                        }),
+                    ),
+            )
+            .item(
+                PopupMenuItem::new(t!("File.cut").to_string()).on_click(window.listener_for(
+                    &view_cut_entries,
+                    move |this, _, _, cx| {
+                        this.select_context_target(filtered_ix, cx);
+                        cx.emit(FileListPanelEvent::CutEntries);
+                    },
+                )),
+            )
+            .item(
+                PopupMenuItem::new(t!("File.paste").to_string())
+                    .icon(IconName::Paste)
+                    .on_click(window.listener_for(&view_paste, move |_this, _, _, cx| {
+                        cx.emit(FileListPanelEvent::PasteInto {
+                            target_dir: target_dir_for_paste.clone(),
+                        });
+                    })),
+            )
+            .separator();
+
+        // 左侧远程端点的 CRUD 尚未端点化，不能显示会落到右侧服务器的操作。
+        if is_dir && capabilities.supports_entry_mutation {
             let view_new_file = view_ref.clone();
             let view_new_folder = view_ref.clone();
 
@@ -823,25 +1164,40 @@ impl FileListPanel {
                 .separator();
         }
 
-        // 重命名（通用）
-        let view_rename = view_ref.clone();
-        menu = menu.item(
-            PopupMenuItem::new(t!("File.rename").to_string())
-                .icon(IconName::Edit)
-                .on_click(window.listener_for(&view_rename, move |_this, _, _, cx| {
-                    cx.emit(FileListPanelEvent::Rename {
-                        name: name_for_rename.clone(),
-                        full_path: path_for_rename.clone(),
-                    });
-                })),
-        );
+        if capabilities.supports_entry_mutation {
+            let view_rename = view_ref.clone();
+            menu = menu.item(
+                PopupMenuItem::new(t!("File.rename").to_string())
+                    .icon(IconName::Edit)
+                    .on_click(window.listener_for(&view_rename, move |_this, _, _, cx| {
+                        cx.emit(FileListPanelEvent::Rename {
+                            name: name_for_rename.clone(),
+                            full_path: path_for_rename.clone(),
+                        });
+                    })),
+            );
+        }
 
-        // 远程面板：下载
+        // 远程端点：下载或服务器间传输。
         if is_remote {
             let view_download = view_ref.clone();
+            let (label, icon) = match transfer_menu_action(source, opposite_is_remote) {
+                TransferMenuAction::Download => {
+                    (t!("Common.download").to_string(), IconName::ArrowDown)
+                }
+                TransferMenuAction::TransferToLeft => (
+                    t!("Transfer.transfer_to_left").to_string(),
+                    IconName::ArrowLeft,
+                ),
+                TransferMenuAction::TransferToRight => (
+                    t!("Transfer.transfer_to_right").to_string(),
+                    IconName::ArrowRight,
+                ),
+                TransferMenuAction::Upload => unreachable!("remote source cannot upload"),
+            };
             menu = menu.item(
-                PopupMenuItem::new(t!("Common.download").to_string())
-                    .icon(IconName::ArrowDown)
+                PopupMenuItem::new(label)
+                    .icon(icon)
                     .on_click(window.listener_for(&view_download, move |this, _, _, cx| {
                         this.select_context_target(filtered_ix, cx);
                         cx.emit(FileListPanelEvent::Download {
@@ -851,7 +1207,7 @@ impl FileListPanel {
                     })),
             );
 
-            if !is_dir {
+            if capabilities.supports_remote_editing && !is_dir {
                 let view_edit = view_ref.clone();
                 menu = menu.item(
                     PopupMenuItem::new(t!("Common.edit").to_string())
@@ -883,7 +1239,10 @@ impl FileListPanel {
                 }
             }
 
-            if !is_dir && crate::archive_kind_for_name(name).is_some() {
+            if capabilities.supports_remote_editing
+                && !is_dir
+                && crate::archive_kind_for_name(name).is_some()
+            {
                 let view_extract = view_ref.clone();
                 menu = menu.item(
                     PopupMenuItem::new(t!("File.extract").to_string())
@@ -899,7 +1258,10 @@ impl FileListPanel {
         }
 
         // 本地面板：上传
-        if !is_remote {
+        if matches!(
+            transfer_menu_action(source, opposite_is_remote),
+            TransferMenuAction::Upload
+        ) {
             let view_upload = view_ref.clone();
             menu = menu.item(
                 PopupMenuItem::new(t!("Common.upload").to_string())
@@ -912,7 +1274,7 @@ impl FileListPanel {
         }
 
         // 远程面板：修改权限
-        if is_remote {
+        if capabilities.supports_remote_editing {
             let view_permissions = view_ref.clone();
             menu = menu.item(
                 PopupMenuItem::new(t!("File.change_permission").to_string())
@@ -932,11 +1294,11 @@ impl FileListPanel {
         if is_dir {
             let view_terminal_at = view_ref.clone();
             let view_terminal = view_ref.clone();
-            let view_favorite = view_ref.clone();
 
-            menu = menu
-                .separator()
-                .item(
+            menu = menu.separator();
+            if capabilities.supports_favorite {
+                let view_favorite = view_ref.clone();
+                menu = menu.item(
                     PopupMenuItem::new(t!("FavoritePath.add_path").to_string())
                         .icon(IconName::Star)
                         .on_click(window.listener_for(&view_favorite, move |_this, _, _, cx| {
@@ -944,7 +1306,9 @@ impl FileListPanel {
                                 full_path: path_for_favorite.clone(),
                             });
                         })),
-                )
+                );
+            }
+            menu = menu
                 .item(
                     PopupMenuItem::new(t!("Terminal.open_here").to_string())
                         .icon(IconName::Terminal)
@@ -994,22 +1358,40 @@ impl FileListPanel {
                     ),
             );
 
-        // 删除（通用）
-        let view_delete = view_ref.clone();
-        menu = menu.separator().item(
-            PopupMenuItem::new(t!("Common.delete").to_string())
-                .icon(IconName::Remove)
-                .on_click(window.listener_for(&view_delete, move |this, _, _, cx| {
-                    this.select_context_target(filtered_ix, cx);
-                    cx.emit(FileListPanelEvent::Delete {
-                        name: name_for_delete.clone(),
-                        full_path: path_for_delete.clone(),
-                    });
-                })),
-        );
+        if capabilities.supports_delete {
+            let view_delete = view_ref.clone();
+            menu = menu.separator().item(
+                PopupMenuItem::new(t!("Common.delete").to_string())
+                    .icon(IconName::Remove)
+                    .on_click(window.listener_for(&view_delete, move |this, _, _, cx| {
+                        this.select_context_target(filtered_ix, cx);
+                        cx.emit(FileListPanelEvent::Delete {
+                            name: name_for_delete.clone(),
+                            full_path: path_for_delete.clone(),
+                        });
+                    })),
+            );
+        }
+
+        if let Some(item) = item_for_properties {
+            let view_properties = view_ref.clone();
+            let properties_path = full_path.to_string();
+            menu = menu.item(
+                PopupMenuItem::new(t!("File.properties").to_string())
+                    .icon(IconName::Info)
+                    .on_click(
+                        window.listener_for(&view_properties, move |_this, _, _, cx| {
+                            cx.emit(FileListPanelEvent::Properties {
+                                item: item.clone(),
+                                full_path: properties_path.clone(),
+                            });
+                        }),
+                    ),
+            );
+        }
 
         // 远程面板文件夹：上传文件、上传文件夹
-        if is_remote && is_dir {
+        if is_remote && is_dir && capabilities.supports_upload_picker {
             let view_upload_file = view_ref.clone();
             let view_upload_folder = view_ref.clone();
 
@@ -1118,6 +1500,18 @@ pub enum FileListPanelEvent {
     },
     /// 复制绝对路径
     CopyAbsolutePath {
+        full_path: String,
+    },
+    CopyEntries,
+    CutEntries,
+    PasteInto {
+        target_dir: String,
+    },
+    Properties {
+        item: FileItem,
+        full_path: String,
+    },
+    CalculateSize {
         full_path: String,
     },
     /// 删除文件/文件夹
@@ -1287,8 +1681,61 @@ impl Render for DraggedFileItem {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileListContentState, display_file_name, file_list_content_state};
+    use super::{
+        DirectorySizeState, FileColumn, FileContextMenuCapabilities, FileItem,
+        FileListContentState, TransferMenuAction, display_file_name,
+        file_context_menu_capabilities, file_list_content_state, format_file_size, size_sort_key,
+        transfer_menu_action,
+    };
+    use crate::endpoint::DragSource;
     use std::collections::HashSet;
+    use std::time::UNIX_EPOCH;
+
+    fn file_item(size: u64) -> FileItem {
+        FileItem {
+            name: "file".to_string(),
+            size,
+            modified: UNIX_EPOCH,
+            is_dir: false,
+            permissions: String::new(),
+            owner: None,
+            directory_size: DirectorySizeState::Unknown,
+        }
+    }
+
+    fn directory_item(state: DirectorySizeState) -> FileItem {
+        FileItem {
+            name: "folder".to_string(),
+            size: 0,
+            modified: UNIX_EPOCH,
+            is_dir: true,
+            permissions: String::new(),
+            owner: None,
+            directory_size: state,
+        }
+    }
+
+    #[test]
+    fn zero_byte_files_display_zero_bytes() {
+        assert_eq!("0 B", format_file_size(0));
+    }
+
+    #[test]
+    fn size_sort_key_distinguishes_unknown_and_empty_directories() {
+        assert_eq!((0, 0), size_sort_key(&file_item(0)));
+        assert_eq!(
+            (0, 0),
+            size_sort_key(&directory_item(DirectorySizeState::Ready(0)))
+        );
+        assert_eq!(
+            (1, 0),
+            size_sort_key(&directory_item(DirectorySizeState::Calculating))
+        );
+        assert_eq!(
+            (2, 0),
+            size_sort_key(&directory_item(DirectorySizeState::Unknown))
+        );
+    }
 
     #[test]
     fn display_file_name_replaces_line_breaks_and_tabs() {
@@ -1301,6 +1748,76 @@ mod tests {
     #[test]
     fn display_file_name_replaces_ansi_control_bytes() {
         assert_eq!("?[1mroot?[0m", display_file_name("\x1b[1mroot\x1b[0m"));
+    }
+
+    #[test]
+    fn name_column_is_always_visible_while_other_columns_are_configurable() {
+        assert!(!FileColumn::Name.can_hide());
+        assert!(FileColumn::Modified.can_hide());
+        assert!(FileColumn::Size.can_hide());
+        assert!(FileColumn::Kind.can_hide());
+        assert!(FileColumn::Owner.can_hide());
+    }
+
+    #[test]
+    fn remote_left_context_menu_hides_unimplemented_mutations() {
+        assert_eq!(
+            FileContextMenuCapabilities {
+                is_remote: true,
+                supports_entry_mutation: false,
+                supports_remote_editing: false,
+                supports_favorite: false,
+                supports_delete: false,
+                supports_upload_picker: false,
+            },
+            file_context_menu_capabilities(DragSource::RemoteLeft)
+        );
+    }
+
+    #[test]
+    fn local_and_remote_right_context_menus_keep_supported_actions() {
+        assert_eq!(
+            FileContextMenuCapabilities {
+                is_remote: false,
+                supports_entry_mutation: true,
+                supports_remote_editing: false,
+                supports_favorite: true,
+                supports_delete: true,
+                supports_upload_picker: true,
+            },
+            file_context_menu_capabilities(DragSource::LocalLeft)
+        );
+        assert_eq!(
+            FileContextMenuCapabilities {
+                is_remote: true,
+                supports_entry_mutation: true,
+                supports_remote_editing: true,
+                supports_favorite: true,
+                supports_delete: true,
+                supports_upload_picker: true,
+            },
+            file_context_menu_capabilities(DragSource::RemoteRight)
+        );
+    }
+
+    #[test]
+    fn transfer_menu_action_matches_endpoint_direction() {
+        assert_eq!(
+            TransferMenuAction::Upload,
+            transfer_menu_action(DragSource::LocalLeft, true)
+        );
+        assert_eq!(
+            TransferMenuAction::TransferToRight,
+            transfer_menu_action(DragSource::RemoteLeft, true)
+        );
+        assert_eq!(
+            TransferMenuAction::TransferToLeft,
+            transfer_menu_action(DragSource::RemoteRight, true)
+        );
+        assert_eq!(
+            TransferMenuAction::Download,
+            transfer_menu_action(DragSource::RemoteRight, false)
+        );
     }
 
     #[test]
@@ -1425,6 +1942,7 @@ impl Render for FileListPanel {
                             let current_path = state.current_path.clone();
                             let is_remote = state.is_remote;
                             let drag_source = state.drag_source;
+                            let opposite_is_remote = state.opposite_is_remote;
                             let has_parent = !state.is_at_root();
                             let view = cx.entity();
                             range
@@ -1436,7 +1954,7 @@ impl Render for FileListPanel {
                                     let filtered_ix =
                                         if has_parent { list_ix - 1 } else { list_ix };
                                     let real_ix = state.filtered_indices[filtered_ix];
-                                    let item = &state.items[real_ix];
+                                    let item = state.items[real_ix].clone();
                                     let is_selected = state.selected_indices.contains(&filtered_ix);
                                     let item_name = item.name.clone();
                                     let is_dir = item.is_dir;
@@ -1511,7 +2029,8 @@ impl Render for FileListPanel {
                                     let ctx_name = item_name.clone();
                                     let ctx_full_path = full_path.clone();
                                     let ctx_is_dir = is_dir;
-                                    let ctx_is_remote = is_remote;
+                                    let ctx_drag_source = drag_source;
+                                    let ctx_opposite_is_remote = opposite_is_remote;
                                     let ctx_view = view.clone();
 
                                     div()
@@ -1551,7 +2070,8 @@ impl Render for FileListPanel {
                                                 &ctx_name,
                                                 &ctx_full_path,
                                                 ctx_is_dir,
-                                                ctx_is_remote,
+                                                ctx_drag_source,
+                                                ctx_opposite_is_remote,
                                                 &ctx_view,
                                                 window,
                                                 cx,
@@ -1559,7 +2079,8 @@ impl Render for FileListPanel {
                                         })
                                         .child(state.render_file_row(
                                             filtered_ix,
-                                            item,
+                                            &item,
+                                            &full_path,
                                             is_selected,
                                             cx,
                                         ))

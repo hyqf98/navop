@@ -71,7 +71,7 @@ pub enum RedisBackendKind {
 }
 
 pub const DEFAULT_REDIS_DRIVER_ID: &str = "redis";
-pub const MINIMUM_REDIS_DRIVER_VERSION: &str = "0.1.2";
+pub const MINIMUM_REDIS_DRIVER_VERSION: &str = "0.1.4";
 
 pub fn validate_native_driver_version(
     manifest: &extension_host::NativeDriverManifest,
@@ -192,17 +192,17 @@ mod tests {
     }
 
     #[test]
-    fn redis_native_driver_requires_the_scan_compatible_release() {
-        assert_eq!("0.1.2", MINIMUM_REDIS_DRIVER_VERSION);
+    fn redis_native_driver_requires_the_dropped_connection_recovery_release() {
+        assert_eq!("0.1.4", MINIMUM_REDIS_DRIVER_VERSION);
 
-        let old = native_driver_manifest("0.1.1");
+        let old = native_driver_manifest("0.1.3");
         let error = validate_native_driver_version(&old)
-            .expect_err("the incompatible connection-manager release must be rejected");
-        assert!(error.to_string().contains("requires version >= 0.1.2"));
-        assert!(error.to_string().contains("installed 0.1.1"));
+            .expect_err("the driver without dropped-connection recovery must be rejected");
+        assert!(error.to_string().contains("requires version >= 0.1.4"));
+        assert!(error.to_string().contains("installed 0.1.3"));
 
-        validate_native_driver_version(&native_driver_manifest("0.1.2"))
-            .expect("the fixed driver release must be accepted");
+        validate_native_driver_version(&native_driver_manifest("0.1.4"))
+            .expect("the dropped-connection recovery release must be accepted");
         validate_native_driver_version(&native_driver_manifest("0.2.0"))
             .expect("newer compatible driver releases must be accepted");
     }

@@ -59,9 +59,11 @@ impl HomePage {
 
         let mut page = Self {
             focus_handle: cx.focus_handle(),
+            home_active: true,
             selected_filter: ConnectionType::All,
             connection_layout: AppSettings::current(cx).home_connection_layout.into(),
             home_page_style: AppSettings::current(cx).home_page_style,
+            sidebar_collapsed: false,
             persistent_sidebar_expanded: AppSettings::current(cx).connection_sidebar_expanded,
             workspaces: Vec::new(),
             connections: Vec::new(),
@@ -86,7 +88,6 @@ impl HomePage {
             auth_error: None,
             master_key_unlock_prompt_pending: false,
             master_key_dialog_open: false,
-            sidebar_collapsed: false,
             team_permissions: TeamPermissionSnapshot::from_persisted_user_id(persisted_user_id),
             port_forwarding_runtime: Arc::new(
                 tokio::sync::Mutex::new(PortForwardingRuntime::new()),
