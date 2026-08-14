@@ -17,16 +17,17 @@ use gpui_component::input::InputState;
 use gpui_component::select::SelectState;
 use one_core::cloud_sync::TeamOption;
 use one_core::storage::{
-    ProxyType, RemoteDesktopBackendPreference, RemoteDesktopParams, RemoteDesktopProtocol,
-    StoredConnection, Workspace,
+    ProxyType, RemoteDesktopParams, RemoteDesktopProtocol, StoredConnection, Workspace,
 };
 use rust_i18n::t;
 
-use self::backend_preference::normalize_for_form;
 use self::connection_test::ConnectionTestState;
 use self::inputs::{create_inputs, input_text, non_empty_text, parse_u16};
 use self::persistence::{emit_saved_connection, persist_connection};
-use self::selects::{WorkspaceSelectItem, create_workspace_select};
+use self::selects::{
+    BackendPreferenceSelectItem, WorkspaceSelectItem, create_backend_preference_select,
+    create_workspace_select,
+};
 
 pub struct RemoteDesktopFormWindowConfig {
     pub protocol: RemoteDesktopProtocol,
@@ -55,9 +56,9 @@ pub struct RemoteDesktopFormWindow {
     proxy_password_input: Entity<InputState>,
     workspace_select: Entity<SelectState<Vec<WorkspaceSelectItem>>>,
     team_select: Entity<SelectState<Vec<TeamSelectItem>>>,
+    backend_preference_select: Entity<SelectState<Vec<BackendPreferenceSelectItem>>>,
     read_only: bool,
     audio_playback: bool,
-    backend_preference: RemoteDesktopBackendPreference,
     proxy_enabled: bool,
     proxy_type: ProxyType,
     sync_enabled: bool,
@@ -111,9 +112,9 @@ impl RemoteDesktopFormWindow {
             proxy_password_input: inputs.proxy_password,
             workspace_select: create_workspace_select(&config, window, cx),
             team_select: create_team_select(&config.teams, None, window, cx),
+            backend_preference_select: create_backend_preference_select(window, cx),
             read_only: false,
             audio_playback: false,
-            backend_preference: RemoteDesktopBackendPreference::default(),
             proxy_enabled: false,
             proxy_type: ProxyType::Socks5,
             sync_enabled: config
@@ -171,7 +172,9 @@ impl RemoteDesktopFormWindow {
             .update(cx, |state, cx| state.set_value(&domain, window, cx));
         self.read_only = params.read_only;
         self.audio_playback = audio_playback_for_protocol(self.protocol, params.audio_playback);
-        self.backend_preference = normalize_for_form(params.backend_preference);
+        self.backend_preference_select.update(cx, |state, cx| {
+            state.set_selected_value(&params.backend_preference, window, cx)
+        });
         self.apply_proxy(params.proxy, window, cx);
     }
 
@@ -200,7 +203,12 @@ impl RemoteDesktopFormWindow {
             read_only: self.read_only,
             audio_playback: audio_playback_for_protocol(self.protocol, self.audio_playback),
             proxy,
-            backend_preference: self.backend_preference,
+            backend_preference: self
+                .backend_preference_select
+                .read(cx)
+                .selected_value()
+                .copied()
+                .unwrap_or_default(),
         })
     }
 
