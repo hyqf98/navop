@@ -415,15 +415,15 @@ impl RemoteDesktopProtocol {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteDesktopBackendPreference {
-    #[default]
     Auto,
     WindowsNative,
+    #[default]
     Canvas,
 }
 
 impl RemoteDesktopBackendPreference {
-    fn is_auto(value: &Self) -> bool {
-        *value == Self::Auto
+    fn is_canvas(value: &Self) -> bool {
+        *value == Self::Canvas
     }
 }
 
@@ -443,7 +443,7 @@ pub struct RemoteDesktopParams {
     pub proxy: Option<ProxyConfig>,
     #[serde(
         default,
-        skip_serializing_if = "RemoteDesktopBackendPreference::is_auto"
+        skip_serializing_if = "RemoteDesktopBackendPreference::is_canvas"
     )]
     pub backend_preference: RemoteDesktopBackendPreference,
 }
@@ -2414,7 +2414,7 @@ mod serial_tests {
             read_only: false,
             audio_playback: false,
             proxy: None,
-            backend_preference: RemoteDesktopBackendPreference::Auto,
+            backend_preference: RemoteDesktopBackendPreference::Canvas,
         };
 
         let conn = StoredConnection::new_remote_desktop("win-rdp".to_string(), params, Some(42));
@@ -2454,7 +2454,7 @@ mod serial_tests {
         assert!(params.proxy.is_none());
         assert!(!params.audio_playback);
         assert_eq!(
-            RemoteDesktopBackendPreference::Auto,
+            RemoteDesktopBackendPreference::Canvas,
             params.backend_preference
         );
     }
@@ -2503,6 +2503,30 @@ mod serial_tests {
             serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
         assert_eq!(
             RemoteDesktopBackendPreference::WindowsNative,
+            restored.backend_preference
+        );
+    }
+
+    #[test]
+    fn remote_desktop_params_round_trip_preserves_explicit_auto_backend() {
+        let json = r#"{
+            "protocol":"Rdp",
+            "host":"10.0.0.8",
+            "port":3389,
+            "username":null,
+            "password":null,
+            "domain":null,
+            "read_only":false,
+            "backend_preference":"auto"
+        }"#;
+
+        let params: RemoteDesktopParams = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&params).unwrap();
+        assert_eq!(Some("auto"), serialized["backend_preference"].as_str());
+
+        let restored: RemoteDesktopParams = serde_json::from_value(serialized).unwrap();
+        assert_eq!(
+            RemoteDesktopBackendPreference::Auto,
             restored.backend_preference
         );
     }
