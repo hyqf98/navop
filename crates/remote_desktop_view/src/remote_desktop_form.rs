@@ -209,6 +209,7 @@ impl RemoteDesktopFormWindow {
                 .selected_value()
                 .copied()
                 .unwrap_or_default(),
+            rdp: None,
         })
     }
 
