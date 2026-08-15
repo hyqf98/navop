@@ -20,6 +20,7 @@ impl RemoteDesktopView {
                     }
 
                     let focus_handle = this.poll_windows_native_events();
+                    this.refresh_windows_native_readiness();
                     this.flush_windows_native_display_settings(Instant::now());
                     cx.notify();
                     focus_handle
